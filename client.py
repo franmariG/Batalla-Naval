@@ -7,7 +7,7 @@ import time
 import os # Para construir rutas a los archivos de sonido
 
 # --- Configuración de Conexión ---
-SERVER_IP = '127.0.0.1' 
+SERVER_IP = '172.24.43.50' 
 PORT = 8080
 
 # --- Configuración de Pygame ---
@@ -80,7 +80,7 @@ SHIP_IMAGE_FILES = {
 }
 # Ruta base para archivos (scripts, sonidos, imágenes)
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-
+assets_path = os.path.join(BASE_PATH, "assets")
 
 # Variables para sonidos
 hit_sound = None
@@ -441,9 +441,9 @@ def game_main_loop():
     # --- Inicializar Sonidos ---
     pygame.mixer.init() 
     try:
-        hit_sound_file = os.path.join(BASE_PATH, "acertado.wav")
-        miss_sound_file = os.path.join(BASE_PATH, "fallido.wav")
-        sunk_sound_file = os.path.join(BASE_PATH, "hundido.wav") # NUEVO
+        hit_sound_file = os.path.join(assets_path, "acertado.wav")
+        miss_sound_file = os.path.join(assets_path, "fallido.wav")
+        sunk_sound_file = os.path.join(assets_path, "hundido.wav") # NUEVO
         
         if os.path.exists(hit_sound_file): hit_sound = pygame.mixer.Sound(hit_sound_file)
         else: print(f"Advertencia: No se encontró {hit_sound_file}")
@@ -466,7 +466,7 @@ def game_main_loop():
             continue
 
         try:
-            image_path = os.path.join(BASE_PATH, ship_filename)
+            image_path = os.path.join(assets_path, ship_filename)
             if os.path.exists(image_path):
                 # Cargar imagen base (asumimos que es horizontal)
                 # Las imágenes deben ser diseñadas para que la versión horizontal tenga altura CELL_SIZE

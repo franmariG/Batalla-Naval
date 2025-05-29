@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 
-HOST = '0.0.0.0'
+HOST = '172.24.43.50'
 PORT = 8080
 
 # --- Estado del Servidor ---
