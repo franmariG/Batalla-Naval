@@ -428,7 +428,6 @@ def check_if_opponent_is_defeated(opponent_b):
                 hits_on_opponent += 1
     return hits_on_opponent >= TOTAL_SHIP_CELLS
 
-# --- Bucle Principal del Juego (Cliente) ---
 def game_main_loop():
     global screen, font_large, font_medium, font_small, current_game_state, status_bar_message
     global current_ship_orientation, SERVER_IP, hit_sound, miss_sound,sunk_sound, client_socket
@@ -438,8 +437,17 @@ def game_main_loop():
     print(f"Usando IP del servidor: {SERVER_IP}")
 
     pygame.init()
+    
+    # --- Mueve esta línea ARRIBA de la carga de imágenes ---
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption(f"Batalla Naval Cliente")
+    font_large = pygame.font.Font(None, 48)
+    font_medium = pygame.font.Font(None, 36)
+    font_small = pygame.font.Font(None, 28)
+    # --- Fin del movimiento ---
+
     # --- Inicializar Sonidos ---
-    pygame.mixer.init() 
+    pygame.mixer.init()
     try:
         hit_sound_file = os.path.join(assets_path, "acertado.wav")
         miss_sound_file = os.path.join(assets_path, "fallido.wav")
@@ -456,12 +464,14 @@ def game_main_loop():
 
     except Exception as e: print(f"Error cargando sonidos: {e}")
     
-    # --- Cargar Imágenes de Barcos ---
+     # --- Cargar Imágenes de Barcos ---
     print("Cargando imágenes de barcos...")
-    for ship_name_key, ship_detail_tuple in SHIPS_CONFIG: # SHIPS_CONFIG es [(nombre, tamaño), ...]
+    # SHIPS_CONFIG es una lista de tuplas, por ejemplo: [("Carrier", 5), ...]
+    # Cuando iteras, 'ship_name_key' será el nombre y 'ship_size' será el número entero.
+    for ship_name_key, ship_size in SHIPS_CONFIG: # <-- Cambiado 'ship_detail_tuple' a 'ship_size'
         ship_filename = SHIP_IMAGE_FILES.get(ship_name_key)
         if not ship_filename:
-            print(f"  No se definió archivo de imagen para: {ship_name_key}")
+            print(f"   No se definió archivo de imagen para: {ship_name_key}")
             ship_images[ship_name_key] = None # Marcar como no disponible
             continue
 
@@ -469,11 +479,10 @@ def game_main_loop():
             image_path = os.path.join(assets_path, ship_filename)
             if os.path.exists(image_path):
                 # Cargar imagen base (asumimos que es horizontal)
-                # Las imágenes deben ser diseñadas para que la versión horizontal tenga altura CELL_SIZE
-                # y anchura CELL_SIZE * tamaño_barco.
                 img_h_original = pygame.image.load(image_path).convert_alpha()
                 
-                ship_size = ship_detail_tuple[1] # Obtener tamaño del barco
+                # 'ship_size' ya es el entero (5, 4, 3, etc.)
+                # ship_size = ship_detail_tuple[1] # <--- ¡Esta línea causaba el error!
                 
                 # Escalar imagen horizontal
                 scaled_h_width = ship_size * CELL_SIZE
@@ -481,27 +490,19 @@ def game_main_loop():
                 img_h = pygame.transform.scale(img_h_original, (scaled_h_width, scaled_h_height))
                 
                 # Crear imagen vertical rotando y escalando la original (o la horizontal escalada)
-                # Rotar la original para mejor calidad antes de escalar a vertical
-                img_v_temp = pygame.transform.rotate(img_h_original, 90) 
-                scaled_v_width = CELL_SIZE 
+                img_v_temp = pygame.transform.rotate(img_h_original, 90)
+                scaled_v_width = CELL_SIZE
                 scaled_v_height = ship_size * CELL_SIZE
                 img_v = pygame.transform.scale(img_v_temp, (scaled_v_width, scaled_v_height))
                 
                 ship_images[ship_name_key] = {"H": img_h, "V": img_v}
-                print(f"  Imagen para {ship_name_key} cargada y procesada.")
+                print(f"   Imagen para {ship_name_key} cargada y procesada.")
             else:
-                print(f"  Archivo de imagen NO ENCONTRADO para {ship_name_key}: {image_path}")
+                print(f"   Archivo de imagen NO ENCONTRADO para {ship_name_key}: {image_path}")
                 ship_images[ship_name_key] = None
         except Exception as e:
-            print(f"  Error cargando/procesando imagen para {ship_name_key}: {e}")
+            print(f"   Error cargando/procesando imagen para {ship_name_key}: {e}")
             ship_images[ship_name_key] = None
-
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption(f"Batalla Naval Cliente")
-    font_large = pygame.font.Font(None, 48)
-    font_medium = pygame.font.Font(None, 36)
-    font_small = pygame.font.Font(None, 28)
-    
 
     threading.Thread(target=connect_to_server_thread, daemon=True).start()
 
@@ -509,14 +510,13 @@ def game_main_loop():
     game_clock = pygame.time.Clock()
 
     while is_game_running:
-        # ... (resto del bucle game_main_loop, manejo de eventos, y dibujo como estaba,
-        # pero el dibujo de los tableros ahora llamará a la nueva draw_game_grid) ...
+        # ... (resto del bucle principal) ...
         mouse_current_pos = pygame.mouse.get_pos()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 is_game_running = False
             
-            if current_game_state != STATE_GAME_OVER : 
+            if current_game_state != STATE_GAME_OVER :
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if current_game_state == STATE_SETUP_SHIPS and current_ship_placement_index < len(ships_to_place_list):
                         r, c = get_grid_cell_from_mouse(mouse_current_pos, BOARD_OFFSET_X_MY, BOARD_OFFSET_Y)
@@ -524,13 +524,13 @@ def game_main_loop():
                             attempt_to_place_ship(my_board_data, r, c, ships_to_place_list[current_ship_placement_index])
                     elif current_game_state == STATE_YOUR_TURN:
                         r, c = get_grid_cell_from_mouse(mouse_current_pos, BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y)
-                        if r is not None and c is not None and opponent_board_data[r][c] == 0: 
+                        if r is not None and c is not None and opponent_board_data[r][c] == 0:
                             send_message_to_server(f"SHOT {r} {c}")
                             status_bar_message = "Disparo enviado. Esperando resultado..."
                 
                 if event.type == pygame.KEYDOWN:
                     if current_game_state == STATE_SETUP_SHIPS:
-                        if event.key == pygame.K_r: 
+                        if event.key == pygame.K_r:
                             current_ship_orientation = 'V' if current_ship_orientation == 'H' else 'H'
                             next_ship_name_display = ""
                             if current_ship_placement_index < len(ships_to_place_list):
@@ -542,12 +542,11 @@ def game_main_loop():
         draw_text_on_screen(screen, f"TU FLOTA ({player_id_str or '---'})", (BOARD_OFFSET_X_MY, BOARD_OFFSET_Y - 40), font_medium)
         draw_text_on_screen(screen, "FLOTA ENEMIGA", (BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y - 40), font_medium)
         
-        # Llamadas a la función de dibujo de tablero actualizada
-        draw_game_grid(screen, BOARD_OFFSET_X_MY, BOARD_OFFSET_Y, my_board_data, True) # True para is_my_board
-        draw_game_grid(screen, BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y, opponent_board_data, False) # False para is_my_board
+        draw_game_grid(screen, BOARD_OFFSET_X_MY, BOARD_OFFSET_Y, my_board_data, True)
+        draw_game_grid(screen, BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y, opponent_board_data, False)
 
         if current_game_state == STATE_SETUP_SHIPS:
-            draw_ship_placement_preview(screen, mouse_current_pos) # Ya modificado para imágenes
+            draw_ship_placement_preview(screen, mouse_current_pos)
             if current_ship_placement_index < len(ships_to_place_list):
                  ship_name, ship_size_val = ships_to_place_list[current_ship_placement_index]
                  orient_text = 'H' if current_ship_orientation == 'H' else 'V'
@@ -557,15 +556,14 @@ def game_main_loop():
         pygame.draw.rect(screen, (30,30,30), (0, SCREEN_HEIGHT - 40, SCREEN_WIDTH, 40))
         draw_text_on_screen(screen, status_bar_message, (10, SCREEN_HEIGHT - 30), font_small, STATUS_TEXT_COLOR)
         
-        pygame.display.flip() 
-        game_clock.tick(30) 
+        pygame.display.flip()
+        game_clock.tick(30)
 
-    # --- Limpieza al salir del bucle principal ---
     print("Saliendo del bucle principal de Pygame.")
-    if client_socket: # ... (cierre de socket como antes)
+    if client_socket:
         print("Cerrando socket del cliente...")
         try:
-            client_socket.shutdown(socket.SHUT_RDWR) 
+            client_socket.shutdown(socket.SHUT_RDWR)
             client_socket.close()
         except Exception as e:
             print(f"Error al cerrar el socket del cliente: {e}")
