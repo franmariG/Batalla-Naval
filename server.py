@@ -8,14 +8,23 @@ PORT = 8080
 
 # --- Estado del Servidor ---
 clients = {}
-player_setup_complete = {"P1": False, "P2": False}
-game_active = False
-current_turn_player_id = None
-turn_lock = threading.Lock()
+# Cambia player_setup_complete y turnos a por-partida
+pair_ids = [("P1", "P2"), ("P3", "P4")]
+pair_for_player = {"P1": 0, "P2": 0, "P3": 1, "P4": 1}
+pair_names = [["P1", "P2"], ["P3", "P4"]]
+pair_setup_complete = [{}, {}]  # [{P1: False, P2: False}, {P3: False, P4: False}]
+pair_game_active = [False, False]
+pair_current_turn = [None, None]
+pair_turn_lock = [threading.Lock(), threading.Lock()]
+MAX_PLAYERS = 4
+game_mode = None  # 2 o 4, según la selección del primer cliente
 
-def notify_other_player(sender_player_id, message_bytes):
-    receiver_player_id = "P2" if sender_player_id == "P1" else "P1"
-    if receiver_player_id in clients and clients[receiver_player_id].get('conn'): # .get('conn') for safety
+def notify_pair_opponent(sender_player_id, message_bytes):
+    """Notifica solo al oponente del par correspondiente."""
+    pair_idx = pair_for_player[sender_player_id]
+    p1, p2 = pair_names[pair_idx]
+    receiver_player_id = p2 if sender_player_id == p1 else p1
+    if receiver_player_id in clients and clients[receiver_player_id].get('conn'):
         try:
             clients[receiver_player_id]['conn'].sendall(message_bytes)
         except Exception as e:
@@ -26,24 +35,56 @@ def notify_other_player(sender_player_id, message_bytes):
 # ... (ASEGÚRATE DE TENER LAS DEFINICIONES GLOBALES DE: clients, player_setup_complete, game_active, current_turn_player_id, turn_lock)
 
 def handle_client_connection(conn, player_id):
-    global game_active, current_turn_player_id, player_setup_complete, clients
+    global clients, game_mode, pair_setup_complete, pair_game_active, pair_current_turn
 
     print(f"Jugador {player_id} ({clients[player_id]['addr']}) conectado.")
     try:
-        # Esperar si el cliente envía el nombre primero
+        # Esperar si el cliente envía el modo de juego y/o nombre juntos
         conn.settimeout(2.0)
         try:
             initial_bytes = conn.recv(1024)
             if initial_bytes:
                 initial_msg = initial_bytes.decode().strip()
-                if initial_msg.startswith("PLAYER_NAME "):
-                    player_name = initial_msg[len("PLAYER_NAME "):].strip()
-                    clients[player_id]['name'] = player_name
-                    print(f"Nombre recibido de {player_id}: {player_name}")
-                else:
-                    # Si no es el nombre, dejar el mensaje para el bucle normal
-                    clients[player_id]['name'] = f"Jugador {player_id}"
-                    # Volver a poner el mensaje en el buffer (no trivial), así que simplemente procesar después
+                # Procesar todos los comandos recibidos juntos
+                cmds = initial_msg.split("PLAYER_NAME")
+                mode_processed = False
+                name_processed = False
+                for part in cmds:
+                    part = part.strip()
+                    if part.startswith("MODE_SELECT"):
+                        try:
+                            mode_val = int(part.split()[1])
+                            if game_mode is None and mode_val in (2, 4):
+                                game_mode = mode_val
+                                print(f"Modo de juego seleccionado: {game_mode} jugadores.")
+                            elif game_mode is None:
+                                game_mode = 2
+                        except Exception as e:
+                            print(f"Error procesando MODE_SELECT: {e}")
+                        # Informar al cliente el modo seleccionado
+                        conn.sendall(f"GAME_MODE {game_mode}".encode())
+                        mode_processed = True
+                    elif part:
+                        # Si hay algo más, puede ser el nombre
+                        player_name = part.strip()
+                        if player_name:
+                            clients[player_id]['name'] = player_name
+                            print(f"Nombre recibido de {player_id}: {player_name}")
+                            name_processed = True
+                # Si no se recibió el nombre, esperar otro mensaje
+                if not name_processed:
+                    name_bytes = conn.recv(1024)
+                    if name_bytes:
+                        name_msg = name_bytes.decode().strip()
+                        if name_msg.startswith("PLAYER_NAME "):
+                            player_name = name_msg[len("PLAYER_NAME "):].strip()
+                            clients[player_id]['name'] = player_name
+                            print(f"Nombre recibido de {player_id}: {player_name}")
+                        else:
+                            clients[player_id]['name'] = f"Jugador {player_id}"
+                # Si no se recibió el modo, informar el modo actual (si ya fue seleccionado)
+                if not mode_processed and game_mode:
+                    conn.sendall(f"GAME_MODE {game_mode}".encode())
             else:
                 clients[player_id]['name'] = f"Jugador {player_id}"
         except socket.timeout:
@@ -53,51 +94,56 @@ def handle_client_connection(conn, player_id):
         conn.sendall(f"PLAYER_ID {player_id}".encode())
         time.sleep(0.1)
 
-        # Esperar a que ambos jugadores estén conectados y tengan nombre
+        # --- Cambios aquí: lógica por par ---
+        pair_idx = pair_for_player[player_id]
+        p1, p2 = pair_names[pair_idx]
+        # Inicializa setup para el par si no existe
+        for pid in (p1, p2):
+            if pid not in pair_setup_complete[pair_idx]:
+                pair_setup_complete[pair_idx][pid] = False
+
+        # Esperar a que ambos jugadores del par estén conectados y tengan nombre
         wait_loops = 0
-        while len(clients) < 2 or not all('name' in c for c in clients.values()):
+        while not (p1 in clients and p2 in clients and
+                   'name' in clients[p1] and 'name' in clients[p2]):
             wait_loops += 1
-            if player_id not in clients or not clients[player_id].get('conn'): 
-                print(f"DEBUG [{player_id}]: Jugador desconectado mientras esperaba al otro. Terminando hilo de espera.")
-                return 
-            if not game_active:
-                conn.sendall(b"MSG Esperando al otro jugador...")
+            if player_id not in clients or not clients[player_id].get('conn'):
+                print(f"DEBUG [{player_id}]: Jugador desconectado mientras esperaba a su par. Terminando hilo de espera.")
+                return
+            if not pair_game_active[pair_idx]:
+                conn.sendall(b"MSG Esperando a tu oponente...")
             if wait_loops % 5 == 0:
-                print(f"DEBUG [{player_id}]: Sigue esperando al otro jugador/nombres (lleva {wait_loops}s). Clientes actuales: {list(clients.keys())}")
+                print(f"DEBUG [{player_id}]: Esperando a su par ({p1}, {p2}) (lleva {wait_loops}s).")
             time.sleep(1)
 
-        # Enviar el nombre del oponente a este cliente
-        other_id = "P2" if player_id == "P1" else "P1"
+        # Enviar nombre del oponente solo del par
+        other_id = p2 if player_id == p1 else p1
         opponent_name = clients[other_id].get('name', f"Jugador {other_id}")
         try:
             conn.sendall(f"OPPONENT_NAME {opponent_name}".encode())
         except Exception as e:
             print(f"Error enviando nombre del oponente a {player_id}: {e}")
 
-        # Bucle de espera hasta que ambos jugadores estén conectados
+        # Esperar a que ambos jugadores del par estén conectados
         wait_loops = 0
-        while len(clients) < 2:
+        while not (p1 in clients and p2 in clients):
             wait_loops += 1
-            if player_id not in clients or not clients[player_id].get('conn'): 
-                print(f"DEBUG [{player_id}]: Jugador desconectado mientras esperaba al otro. Terminando hilo de espera.")
-                return 
-            if not game_active: # Solo enviar si el juego no ha empezado o terminado
-                 conn.sendall(b"MSG Esperando al otro jugador...")
-            
-            # Para evitar un log spam si un jugador espera mucho y el otro tarda o no conecta
-            if wait_loops % 5 == 0: # Imprime cada 5 segundos aprox
-                print(f"DEBUG [{player_id}]: Sigue esperando al otro jugador (lleva {wait_loops}s). Clientes actuales: {list(clients.keys())}")
+            if player_id not in clients or not clients[player_id].get('conn'):
+                print(f"DEBUG [{player_id}]: Jugador desconectado mientras esperaba a su par. Terminando hilo de espera.")
+                return
+            if not pair_game_active[pair_idx]:
+                conn.sendall(b"MSG Esperando a tu oponente...")
+            if wait_loops % 5 == 0:
+                print(f"DEBUG [{player_id}]: Esperando a su par ({p1}, {p2}) (lleva {wait_loops}s).")
             time.sleep(1)
-            
         if player_id not in clients or not clients[player_id].get('conn'):
             print(f"DEBUG [{player_id}]: Jugador desconectado antes de SETUP_YOUR_BOARD. Terminando hilo.")
             return
 
         # Solo enviar SETUP_YOUR_BOARD si este jugador no ha completado el setup y ambos están conectados
-        # player_setup_complete.get(player_id, False) es más seguro que player_setup_complete[player_id]
-        if len(clients) == 2 and not player_setup_complete.get(player_id, False):
-             conn.sendall(b"SETUP_YOUR_BOARD")
-             print(f"DEBUG [{player_id}]: Enviado SETUP_YOUR_BOARD.")
+        if not pair_setup_complete[pair_idx][player_id]:
+            conn.sendall(b"SETUP_YOUR_BOARD")
+            print(f"DEBUG [{player_id}]: Enviado SETUP_YOUR_BOARD.")
     except socket.error as e:
         print(f"Error de socket inicial con {player_id} (probablemente desconectado): {e}")
         return 
@@ -126,43 +172,37 @@ def handle_client_connection(conn, player_id):
             command = parts[0]
             print(f"DEBUG [{player_id}]: Comando extraído: '{command}'")
 
-            # --- Procesamiento de Comandos ---
+            # --- Procesamiento de Comandos por par ---
             if command == "READY_SETUP":
-                if player_id not in player_setup_complete:
-                    print(f"DEBUG [{player_id}]: 'player_id' ({player_id}) no encontrado en player_setup_complete ({list(player_setup_complete.keys())}). Ignorando READY_SETUP.")
+                if pair_setup_complete[pair_idx][player_id]:
                     continue
-                if game_active: 
-                    print(f"DEBUG [{player_id}]: Juego ya activo. Ignorando READY_SETUP.")
+                if pair_game_active[pair_idx]:
                     continue
-                
-                player_setup_complete[player_id] = True
-                print(f"DEBUG [{player_id}]: Marcado como listo. player_setup_complete: {player_setup_complete}")
+
+                pair_setup_complete[pair_idx][player_id] = True
+                print(f"DEBUG [{player_id}]: Marcado como listo. pair_setup_complete[{pair_idx}]: {pair_setup_complete[pair_idx]}")
                 
                 status_msg_for_other = f"MSG El jugador {player_id} ha terminado de colocar sus barcos."
-                notify_other_player(player_id, status_msg_for_other.encode())
+                notify_pair_opponent(player_id, status_msg_for_other.encode())
                 
                 try:
                     conn.sendall(b"MSG Esperando que el oponente termine la configuracion...")
                 except socket.error:
-                    print(f"DEBUG [{player_id}]: Error al enviar 'MSG Esperando...' (probablemente desconectado).")
                     break 
 
-                is_p1_ready = player_setup_complete.get("P1", False)
-                is_p2_ready = player_setup_complete.get("P2", False)
-                print(f"DEBUG [{player_id}]: Chequeando inicio de juego. P1 Ready: {is_p1_ready}, P2 Ready: {is_p2_ready}, Game Active: {game_active}")
+                is_p1_ready = pair_setup_complete[pair_idx][p1]
+                is_p2_ready = pair_setup_complete[pair_idx][p2]
+                print(f"DEBUG [{player_id}]: Chequeando inicio de juego. {p1} Ready: {is_p1_ready}, {p2} Ready: {is_p2_ready}, Game Active: {pair_game_active[pair_idx]}")
 
-                if is_p1_ready and is_p2_ready and not game_active: 
-                    print(f"DEBUG [{player_id}]: Condición para iniciar juego CUMPLIDA. Intentando adquirir lock.")
-                    with turn_lock:
-                        print(f"DEBUG [{player_id}]: Lock adquirido.")
-                        if not game_active: 
-                            print(f"DEBUG [{player_id}]: 'game_active' es False DENTRO DEL LOCK. Iniciando juego.")
-                            game_active = True 
-                            current_turn_player_id = "P1"
+                if is_p1_ready and is_p2_ready and not pair_game_active[pair_idx]: 
+                    with pair_turn_lock[pair_idx]:
+                        if not pair_game_active[pair_idx]: 
+                            pair_game_active[pair_idx] = True 
+                            pair_current_turn[pair_idx] = p1
                             
-                            conn_p1 = clients.get("P1", {}).get('conn')
-                            conn_p2 = clients.get("P2", {}).get('conn')
-                            start_game_msg_bytes = f"START_GAME {current_turn_player_id}".encode()
+                            conn_p1 = clients.get(p1, {}).get('conn')
+                            conn_p2 = clients.get(p2, {}).get('conn')
+                            start_game_msg_bytes = f"START_GAME {pair_current_turn[pair_idx]}".encode()
                             error_sending_start = False
 
                             if conn_p1:
@@ -176,82 +216,81 @@ def handle_client_connection(conn, player_id):
                             else: print(f"ERROR [{player_id}]: No se encontró conexión para P2 al intentar enviar START_GAME."); error_sending_start = True
                             
                             if not error_sending_start:
-                                print(f"INFO: Ambos jugadores notificados. El juego ha comenzado. Turno para: {current_turn_player_id}")
+                                print(f"INFO: Ambos jugadores notificados. El juego ha comenzado. Turno para: {pair_current_turn[pair_idx]}")
                             else:
                                 print(f"ERROR: Hubo un problema al notificar a los jugadores para iniciar el juego. Reseteando game_active.")
-                                game_active = False 
-                                current_turn_player_id = None 
+                                pair_game_active[pair_idx] = False 
+                                pair_current_turn[pair_idx] = None 
                         else:
                             print(f"DEBUG [{player_id}]: 'game_active' es TRUE dentro del lock. Otro hilo ya inició el juego.")
                 else:
-                    if not is_p1_ready: print(f"DEBUG [{player_id}]: Condición NO cumplida porque P1 no está listo ({is_p1_ready}). Estado actual: {player_setup_complete}")
-                    if not is_p2_ready: print(f"DEBUG [{player_id}]: Condición NO cumplida porque P2 no está listo ({is_p2_ready}). Estado actual: {player_setup_complete}")
-                    if game_active and is_p1_ready and is_p2_ready: print(f"DEBUG [{player_id}]: Condición NO cumplida porque game_active es True (aunque P1 y P2 listos).")
+                    if not is_p1_ready: print(f"DEBUG [{player_id}]: Condición NO cumplida porque P1 no está listo ({is_p1_ready}). Estado actual: {pair_setup_complete[pair_idx]}")
+                    if not is_p2_ready: print(f"DEBUG [{player_id}]: Condición NO cumplida porque P2 no está listo ({is_p2_ready}). Estado actual: {pair_setup_complete[pair_idx]}")
+                    if pair_game_active[pair_idx] and is_p1_ready and is_p2_ready: print(f"DEBUG [{player_id}]: Condición NO cumplida porque game_active es True (aunque P1 y P2 listos).")
 
             elif command == "SHOT":
-                if not game_active:
+                if not pair_game_active[pair_idx]:
                     print(f"DEBUG [{player_id}]: SHOT ignorado porque 'game_active' es False.")
                     try: conn.sendall(b"MSG El juego no ha comenzado o ya termino.")
                     except: pass
                     continue
                 
-                if current_turn_player_id != player_id:
-                    print(f"DEBUG [{player_id}]: SHOT ignorado porque no es su turno (es de {current_turn_player_id}).")
+                if pair_current_turn[pair_idx] != player_id:
+                    print(f"DEBUG [{player_id}]: SHOT ignorado porque no es su turno (es de {pair_current_turn[pair_idx]}).")
                     try: conn.sendall(b"MSG No es tu turno.")
                     except: pass
                     continue
                 
                 shot_data_to_other = f"SHOT {parts[1]} {parts[2]}"
-                notify_other_player(player_id, shot_data_to_other.encode())
+                notify_pair_opponent(player_id, shot_data_to_other.encode())
                 print(f"[{player_id}] disparo a ({parts[1]},{parts[2]}). Enviando al oponente.")
 
             elif command == "RESULT":
-                if not game_active:
-                    print(f"DEBUG [{player_id}]: RESULT ignorado porque 'game_active' es False.")
+                if not pair_game_active[pair_idx]:
                     continue
                 
-                original_shooter_id = "P2" if player_id == "P1" else "P1"
+                original_shooter_id = p2 if player_id == p1 else p1
                 update_message_for_shooter = f"UPDATE {parts[1]} {parts[2]} {parts[3]}"
                 if original_shooter_id in clients and clients[original_shooter_id].get('conn'):
                     try: clients[original_shooter_id]['conn'].sendall(update_message_for_shooter.encode())
-                    except Exception as e: print(f"Error enviando UPDATE a {original_shooter_id}: {e}")
+                    except: pass
                 
                 result_char = parts[3] 
-                with turn_lock:
-                    if not game_active: continue # Re-chequear dentro del lock
+                with pair_turn_lock[pair_idx]:
+                    if not pair_game_active[pair_idx]: continue # Re-chequear dentro del lock
                     if result_char == 'H': 
-                        current_turn_player_id = original_shooter_id 
-                        if current_turn_player_id in clients and clients[current_turn_player_id].get('conn'):
-                            try: clients[current_turn_player_id]['conn'].sendall(b"YOUR_TURN_AGAIN")
-                            except Exception as e: print(f"Error enviando YOUR_TURN_AGAIN a {current_turn_player_id}: {e}")
+                        pair_current_turn[pair_idx] = original_shooter_id 
+                        if pair_current_turn[pair_idx] in clients and clients[pair_current_turn[pair_idx]].get('conn'):
+                            try: clients[pair_current_turn[pair_idx]]['conn'].sendall(b"YOUR_TURN_AGAIN")
+                            except: pass
                         player_who_was_hit_id = player_id
                         if player_who_was_hit_id in clients and clients[player_who_was_hit_id].get('conn'):
                              try: clients[player_who_was_hit_id]['conn'].sendall(b"OPPONENT_TURN_MSG") 
-                             except Exception as e: print(f"Error enviando OPPONENT_TURN_MSG a {player_who_was_hit_id}: {e}")
+                             except: pass
                         print(f"Impacto de {original_shooter_id}. {original_shooter_id} sigue jugando.")
                     else: 
-                        current_turn_player_id = player_id 
-                        if current_turn_player_id in clients and clients[current_turn_player_id].get('conn'):
-                             try: clients[current_turn_player_id]['conn'].sendall(b"YOUR_TURN_AGAIN")
-                             except Exception as e: print(f"Error enviando YOUR_TURN_AGAIN a {current_turn_player_id}: {e}")
+                        pair_current_turn[pair_idx] = player_id 
+                        if pair_current_turn[pair_idx] in clients and clients[pair_current_turn[pair_idx]].get('conn'):
+                             try: clients[pair_current_turn[pair_idx]]['conn'].sendall(b"YOUR_TURN_AGAIN")
+                             except: pass
                         other_player_for_turn_notify = original_shooter_id
                         if other_player_for_turn_notify in clients and clients[other_player_for_turn_notify].get('conn'):
                             try: clients[other_player_for_turn_notify]['conn'].sendall(b"OPPONENT_TURN_MSG")
-                            except Exception as e: print(f"Error enviando OPPONENT_TURN_MSG a {other_player_for_turn_notify}: {e}")
-                        print(f"Fallo de {original_shooter_id}. Turno para {current_turn_player_id}.")
+                            except: pass
+                        print(f"Fallo de {original_shooter_id}. Turno para {pair_current_turn[pair_idx]}.")
             
             elif command == "GAME_WON":
-                if not game_active: 
+                if not pair_game_active[pair_idx]: 
                     print(f"DEBUG [{player_id}]: GAME_WON ignorado porque 'game_active' es False.")
                     continue 
                 
                 winner_id = player_id
-                loser_id = "P2" if winner_id == "P1" else "P1"
-                print(f"Comando GAME_WON recibido de {winner_id}. Terminando juego.")
-                with turn_lock: # Es importante asegurar que game_active y current_turn se modifiquen atomicamente
-                    if game_active : # Solo si no fue ya puesto a False por otro medio
-                        game_active = False 
-                        current_turn_player_id = None 
+                loser_id = p2 if winner_id == p1 else p1
+                print(f"Comando GAME_WON recibido de {winner_id}. Terminando juego del par {pair_idx}.")
+                with pair_turn_lock[pair_idx]: # Es importante asegurar que game_active y current_turn se modifiquen atomicamente
+                    if pair_game_active[pair_idx] : # Solo si no fue ya puesto a False por otro medio
+                        pair_game_active[pair_idx] = False 
+                        pair_current_turn[pair_idx] = None 
                     else: # El juego ya estaba marcado como inactivo, no hacer nada más aquí
                         print(f"DEBUG [{player_id}]: GAME_WON procesado, pero 'game_active' ya era False.")
                         break # Salir del bucle si el juego ya terminó
@@ -260,11 +299,11 @@ def handle_client_connection(conn, player_id):
                 # pero después de que game_active ha sido puesto a False.
                 if winner_id in clients and clients[winner_id].get('conn'):
                     try: clients[winner_id]['conn'].sendall(b"GAME_OVER WIN"); print(f"Enviado GAME_OVER WIN a {winner_id}")
-                    except Exception as e: print(f"Error enviando GAME_OVER WIN a {winner_id}: {e}")
+                    except: pass
                 
                 if loser_id in clients and clients[loser_id].get('conn'):
                     try: clients[loser_id]['conn'].sendall(b"GAME_OVER LOSE"); print(f"Enviado GAME_OVER LOSE a {loser_id}")
-                    except Exception as e: print(f"Error enviando GAME_OVER LOSE a {loser_id}: {e}")
+                    except: pass
                 
                 time.sleep(0.5) 
                 print(f"DEBUG [{player_id}]: Hilo del ganador ({winner_id}) terminando después de GAME_WON.")
@@ -315,10 +354,10 @@ def handle_client_connection(conn, player_id):
                                       ("P2" in clients and player_left_id == "P1")
             if other_player_still_exists:
                 print(f"Jugador {player_left_id} se fue durante una partida activa. Notificando al otro.")
-                notify_other_player(player_left_id, b"OPPONENT_LEFT")
+                notify_pair_opponent(player_left_id, b"OPPONENT_LEFT")
             
             # Marcar el juego como inactivo ya que un jugador se fue
-            with turn_lock: # Asegurar que estas variables se actualizan de forma segura
+            with pair_turn_lock: # Asegurar que estas variables se actualizan de forma segura
                 if game_active : # Solo si seguía activo
                     game_active = False
                     current_turn_player_id = None
@@ -328,7 +367,7 @@ def handle_client_connection(conn, player_id):
             print("Todos los jugadores se han desconectado. Reseteando estado del servidor para una nueva partida.")
             player_setup_complete["P1"] = False
             player_setup_complete["P2"] = False
-            with turn_lock: # Asegurar que estas variables se actualizan de forma segura
+            with pair_turn_lock: # Asegurar que estas variables se actualizan de forma segura
                 game_active = False 
                 current_turn_player_id = None
 
@@ -338,7 +377,7 @@ def player_id_exists_in_clients_dict(clients_dict):
 
 
 def start_server():
-    global clients, player_setup_complete, game_active, current_turn_player_id
+    global clients, game_mode
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -349,52 +388,50 @@ def start_server():
         print(f"Error al enlazar el socket en {HOST}:{PORT} - {e}")
         return
         
-    server_socket.listen(2)
+    server_socket.listen(MAX_PLAYERS)
     print(f"Servidor de Batalla Naval escuchando en {HOST}:{PORT}")
     
     while True:
-        if len(clients) < 2:
-            if not clients: # Si el diccionario está realmente vacío
+        # Determinar el máximo de jugadores según el modo (por defecto 2)
+        max_players = game_mode if game_mode in (2, 4) else 2
+        if len(clients) < max_players:
+            if not clients:
                 print("Servidor listo y esperando jugadores...")
 
             try:
                 conn, addr = server_socket.accept()
-            except OSError: # Socket del servidor cerrado
+            except OSError:
                 print("Socket del servidor cerrado. Terminando bucle de aceptación.")
                 break
             except Exception as e:
                 print(f"Error aceptando conexión: {e}")
                 continue
 
-
             assigned_player_id = None
-            # Asignar P1 si no está, luego P2 si no está.
-            if "P1" not in clients:
-                assigned_player_id = "P1"
-            elif "P2" not in clients: # Implies P1 está en clients
-                assigned_player_id = "P2"
-            
-            if assigned_player_id:
-                # Reiniciar estado de setup para el nuevo jugador si es necesario
-                player_setup_complete[assigned_player_id] = False
+            # Asignar P1, P2, P3, P4 según disponibilidad
+            for pid in ("P1", "P2", "P3", "P4"):
+                if pid not in clients:
+                    assigned_player_id = pid
+                    break
 
+            if assigned_player_id:
+                # Inicializar el estado de setup para el par correspondiente
+                pair_idx = pair_for_player[assigned_player_id]
+                if assigned_player_id not in pair_setup_complete[pair_idx]:
+                    pair_setup_complete[pair_idx][assigned_player_id] = False
                 clients[assigned_player_id] = {'conn': conn, 'addr': addr}
                 thread = threading.Thread(target=handle_client_connection, args=(conn, assigned_player_id), daemon=True)
                 thread.start()
-                
-                if len(clients) == 2:
-                    print("Dos jugadores conectados. La fase de configuracion comenzara para cada uno.")
+                if len(clients) == max_players:
+                    print(f"{max_players} jugadores conectados. La fase de configuracion comenzara para cada uno.")
             else:
-                # No debería llegar aquí si len(clients) < 2, pero por si acaso.
-                print(f"Conexión de {addr} rechazada, slots P1/P2 ocupados o estado inconsistente.")
+                print(f"Conexión de {addr} rechazada, slots ocupados o estado inconsistente.")
                 try:
                     conn.sendall(b"MSG Servidor actualmente lleno o en mantenimiento. Intenta mas tarde.")
                     conn.close()
                 except: pass
-        else: 
-            # Hay dos clientes, esperar a que el juego termine o se desconecten.
-            # El `finally` en `handle_client_connection` limpiará `clients`.
-            time.sleep(1) 
+        else:
+            time.sleep(1)
 
     print("Bucle principal del servidor terminado.")
     if server_socket:

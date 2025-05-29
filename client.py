@@ -68,6 +68,7 @@ miss_sound = None
 
 player_name = ""  # Nuevo: nombre del jugador
 opponent_name = ""  # Nuevo: nombre del oponente
+game_mode = None  # 2 o 4, según la selección
 
 def prompt_for_player_name():
     """Muestra una pantalla para que el usuario escriba su nombre antes de conectarse."""
@@ -119,13 +120,53 @@ def prompt_for_player_name():
         pygame.display.flip()
     return text.strip()
 
+def prompt_for_game_mode():
+    """Muestra una pantalla para que el usuario elija entre 2 o 4 jugadores."""
+    global screen, font_large, font_medium, font_small
+    pygame.init()
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption("Batalla Naval - Selecciona modo de juego")
+    font_large = pygame.font.Font(None, 48)
+    font_medium = pygame.font.Font(None, 36)
+    font_small = pygame.font.Font(None, 28)
+
+    button_2 = pygame.Rect(SCREEN_WIDTH // 2 - 160, SCREEN_HEIGHT // 2, 120, 60)
+    button_4 = pygame.Rect(SCREEN_WIDTH // 2 + 40, SCREEN_HEIGHT // 2, 120, 60)
+    selected_mode = None
+
+    while selected_mode is None:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if button_2.collidepoint(event.pos):
+                    selected_mode = 2
+                elif button_4.collidepoint(event.pos):
+                    selected_mode = 4
+
+        screen.fill(BLACK)
+        draw_text_on_screen(screen, "Selecciona el modo de juego:", (SCREEN_WIDTH // 2 - 200, SCREEN_HEIGHT // 2 - 100), font_medium)
+        pygame.draw.rect(screen, (70, 130, 180), button_2)
+        pygame.draw.rect(screen, (70, 130, 180), button_4)
+        draw_text_on_screen(screen, "2 Jugadores", (button_2.x + 5, button_2.y + 15), font_small)
+        draw_text_on_screen(screen, "4 Jugadores", (button_4.x + 5, button_4.y + 15), font_small)
+        pygame.display.flip()
+    return selected_mode
+
 # --- Comunicación con el Servidor ---
 def connect_to_server_thread():
-    global client_socket, current_game_state, status_bar_message, player_id_str, player_name
+    global client_socket, current_game_state, status_bar_message, player_id_str, player_name, game_mode
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         print(f"Intentando conectar a {SERVER_IP}:{PORT}...")
         client_socket.connect((SERVER_IP, PORT))
+        # Si el modo de juego ya fue seleccionado, enviarlo al servidor
+        if game_mode:
+            try:
+                client_socket.sendall(f"MODE_SELECT {game_mode}".encode())
+            except Exception as e:
+                print(f"Error enviando modo de juego: {e}")
         # Enviar el nombre del jugador al servidor
         if player_name:
             try:
@@ -143,7 +184,7 @@ def connect_to_server_thread():
 
 def listen_for_server_messages():
     global current_game_state, status_bar_message, player_id_str, my_board_data, opponent_board_data, client_socket
-    global opponent_name
+    global opponent_name, game_mode
     
     # Bucle mientras el juego no haya terminado Y el socket exista
     while current_game_state != STATE_GAME_OVER and client_socket: 
@@ -160,7 +201,11 @@ def listen_for_server_messages():
             parts = message.split()
             command = parts[0]
 
-            if command == "MSG":
+            if command == "GAME_MODE":
+                # El servidor informa el modo de juego (2 o 4)
+                game_mode = int(parts[1])
+                status_bar_message = f"Modo de juego: {game_mode} jugadores."
+            elif command == "MSG":
                 status_bar_message = ' '.join(parts[1:])
             elif command == "PLAYER_ID":
                 player_id_str = parts[1]
@@ -365,10 +410,13 @@ def check_if_opponent_is_defeated(opponent_b):
 # --- Bucle Principal del Juego (Cliente) ---
 def game_main_loop():
     global screen, font_large, font_medium, font_small, current_game_state, status_bar_message
-    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound, client_socket, player_name, opponent_name
+    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound, client_socket, player_name, opponent_name, game_mode
 
     if len(sys.argv) > 1: SERVER_IP = sys.argv[1]
     print(f"Usando IP del servidor: {SERVER_IP}")
+
+    # --- Selección de modo de juego (solo el primer cliente decide) ---
+    game_mode = prompt_for_game_mode()
 
     # --- Pedir nombre antes de inicializar el juego ---
     player_name = prompt_for_player_name()
