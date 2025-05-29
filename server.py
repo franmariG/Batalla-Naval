@@ -27,11 +27,52 @@ def notify_other_player(sender_player_id, message_bytes):
 
 def handle_client_connection(conn, player_id):
     global game_active, current_turn_player_id, player_setup_complete, clients
-    
+
     print(f"Jugador {player_id} ({clients[player_id]['addr']}) conectado.")
     try:
+        # Esperar si el cliente envía el nombre primero
+        conn.settimeout(2.0)
+        try:
+            initial_bytes = conn.recv(1024)
+            if initial_bytes:
+                initial_msg = initial_bytes.decode().strip()
+                if initial_msg.startswith("PLAYER_NAME "):
+                    player_name = initial_msg[len("PLAYER_NAME "):].strip()
+                    clients[player_id]['name'] = player_name
+                    print(f"Nombre recibido de {player_id}: {player_name}")
+                else:
+                    # Si no es el nombre, dejar el mensaje para el bucle normal
+                    clients[player_id]['name'] = f"Jugador {player_id}"
+                    # Volver a poner el mensaje en el buffer (no trivial), así que simplemente procesar después
+            else:
+                clients[player_id]['name'] = f"Jugador {player_id}"
+        except socket.timeout:
+            clients[player_id]['name'] = f"Jugador {player_id}"
+        finally:
+            conn.settimeout(None)
         conn.sendall(f"PLAYER_ID {player_id}".encode())
         time.sleep(0.1)
+
+        # Esperar a que ambos jugadores estén conectados y tengan nombre
+        wait_loops = 0
+        while len(clients) < 2 or not all('name' in c for c in clients.values()):
+            wait_loops += 1
+            if player_id not in clients or not clients[player_id].get('conn'): 
+                print(f"DEBUG [{player_id}]: Jugador desconectado mientras esperaba al otro. Terminando hilo de espera.")
+                return 
+            if not game_active:
+                conn.sendall(b"MSG Esperando al otro jugador...")
+            if wait_loops % 5 == 0:
+                print(f"DEBUG [{player_id}]: Sigue esperando al otro jugador/nombres (lleva {wait_loops}s). Clientes actuales: {list(clients.keys())}")
+            time.sleep(1)
+
+        # Enviar el nombre del oponente a este cliente
+        other_id = "P2" if player_id == "P1" else "P1"
+        opponent_name = clients[other_id].get('name', f"Jugador {other_id}")
+        try:
+            conn.sendall(f"OPPONENT_NAME {opponent_name}".encode())
+        except Exception as e:
+            print(f"Error enviando nombre del oponente a {player_id}: {e}")
 
         # Bucle de espera hasta que ambos jugadores estén conectados
         wait_loops = 0
@@ -71,6 +112,13 @@ def handle_client_connection(conn, player_id):
             data = data_bytes.decode().strip() # strip() es importante
             if not data: # Ignorar mensajes vacíos después de strip()
                 print(f"DEBUG [{player_id}]: Mensaje vacío recibido y ignorado.")
+                continue
+
+            # Nuevo: Si el cliente envía el nombre después de la conexión inicial
+            if data.startswith("PLAYER_NAME "):
+                player_name = data[len("PLAYER_NAME "):].strip()
+                clients[player_id]['name'] = player_name
+                print(f"Nombre recibido de {player_id}: {player_name}")
                 continue
 
             print(f"DEBUG [{player_id}]: Datos decodificados: '{data}'")
