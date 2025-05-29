@@ -7,7 +7,7 @@ import time
 import os # Para construir rutas a los archivos de sonido
 
 # --- Configuración de Conexión ---
-SERVER_IP = '127.0.0.1' 
+SERVER_IP = '172.24.43.50' 
 PORT = 8080
 
 # --- Configuración de Pygame ---
@@ -311,11 +311,10 @@ def game_main_loop():
     # --- Inicializar Sonidos ---
     pygame.mixer.init() 
     try:
-        # Asegúrate que estos archivos estén en la misma carpeta que client.py
-        # o proporciona la ruta completa.
-        sound_path = os.path.dirname(os.path.abspath(__file__)) # Directorio actual del script
-        hit_sound_file = os.path.join(sound_path, "acertado.wav")
-        miss_sound_file = os.path.join(sound_path, "fallido.wav")
+        sound_path = os.path.dirname(os.path.abspath(__file__))
+        assets_path = os.path.join(sound_path, "assets")
+        hit_sound_file = os.path.join(assets_path, "acertado.wav")
+        miss_sound_file = os.path.join(assets_path, "fallido.wav")
 
         if os.path.exists(hit_sound_file):
             hit_sound = pygame.mixer.Sound(hit_sound_file)
