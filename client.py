@@ -7,7 +7,7 @@ import time
 import os # Para construir rutas a los archivos de sonido
 
 # --- Configuración de Conexión ---
-SERVER_IP = "192.168.1.105"
+SERVER_IP = "172.23.43.50"
 PORT = 8080
 
 # --- Configuración de Pygame ---

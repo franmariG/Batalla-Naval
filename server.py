@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 
-HOST = "192.168.1.105"
+HOST = "172.23.43.50"
 PORT = 8080
 
 # --- Estado del Servidor ---
@@ -364,6 +364,33 @@ def player_id_exists_in_clients_dict(clients_dict):
     return "P1" in clients_dict or "P2" in clients_dict
 
 
+def get_available_games():
+    """
+    Devuelve una lista de partidas disponibles.
+    Si hay menos de 2 jugadores conectados, hay una partida disponible.
+    """
+    games = []
+    if len(clients) < 2:
+        if "P1" in clients and 'name' in clients["P1"]:
+            games.append({"nombre_creador": clients["P1"]['name'], "id": 1})
+        else:
+            games.append({"nombre_creador": "Esperando jugador", "id": 1})
+    return games
+
+def handle_list_games_request(conn):
+    games = get_available_games()
+    games_str = ";".join([f"{g['nombre_creador']}|{g['id']}" for g in games])
+    try:
+        conn.sendall(f"GAMES_LIST {games_str}".encode())
+    except Exception as e:
+        print(f"Error enviando GAMES_LIST: {e}")
+    finally:
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+        conn.close()
+
 def start_server():
     global clients, player_setup_complete, game_active, current_turn_player_id
 
@@ -393,6 +420,31 @@ def start_server():
                 print(f"Error aceptando conexión: {e}")
                 continue
 
+            # --- NUEVO: Manejar conexiones de solo consulta (LIST_GAMES) ---
+            try:
+                conn.settimeout(2.0)
+                first_bytes = conn.recv(1024)
+                if first_bytes:
+                    first_msg = first_bytes.decode().strip()
+                    if first_msg == "LIST_GAMES":
+                        handle_list_games_request(conn)
+                        continue  # No crear hilo de juego para esta conexión
+                    else:
+                        # Si no es LIST_GAMES, devolver el buffer al flujo normal
+                        # (No es necesario, simplemente sigue el flujo normal)
+                        pass
+                conn.settimeout(None)
+            except socket.timeout:
+                conn.settimeout(None)
+                # Si no se recibe nada, cerrar la conexión
+                try: conn.close()
+                except: pass
+                continue
+            except Exception as e:
+                print(f"Error en pre-handle de conexión: {e}")
+                try: conn.close()
+                except: pass
+                continue
 
             assigned_player_id = None
             # Asignar P1 si no está, luego P2 si no está.
@@ -418,7 +470,7 @@ def start_server():
                     conn.sendall(b"MSG Servidor actualmente lleno o en mantenimiento. Intenta mas tarde.")
                     conn.close()
                 except: pass
-        else: 
+        else:
             # Hay dos clientes, esperar a que el juego termine o se desconecten.
             # El `finally` en `handle_client_connection` limpiará `clients`.
             time.sleep(1) 
