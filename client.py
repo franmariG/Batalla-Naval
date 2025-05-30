@@ -7,7 +7,7 @@ import time
 import os # Para construir rutas a los archivos de sonido
 
 # --- Configuración de Conexión ---
-SERVER_IP = '172.24.43.50' 
+SERVER_IP = "169.254.107.4"
 PORT = 8080
 
 # --- Configuración de Pygame ---
@@ -62,6 +62,9 @@ current_ship_placement_index = 0
 current_ship_orientation = 'H' 
 # NUEVO: Para almacenar información detallada de los barcos colocados
 my_placed_ships_detailed = [] 
+opponent_sunk_ships_log = [] # NUEVO: Para barcos hundidos del oponente
+                             # Estructura: {"name": str, "size": int, "coords": [(r,c),...], "orientation": 'H'/'V' o None}
+
 # Estructura de cada elemento en my_placed_ships_detailed:
 # { "name": str, "size": int, "coords": [(r,c), ...], "orientation": 'H'/'V', 
 #   "is_sunk": False, "image_rect_on_board": pygame.Rect, "base_image_key": str }
@@ -105,6 +108,7 @@ def connect_to_server_thread():
 
 def listen_for_server_messages():
     global current_game_state, status_bar_message, player_id_str, my_board_data, opponent_board_data, client_socket
+    global opponent_sunk_ships_log # Asegurar acceso global
     
     # Bucle mientras el juego no haya terminado Y el socket exista
     while current_game_state != STATE_GAME_OVER and client_socket: 
@@ -153,23 +157,92 @@ def listen_for_server_messages():
 
             elif command == "UPDATE": 
                 r, c = int(parts[1]), int(parts[2])
-                result_char = parts[3]
-                opponent_board_data[r][c] = result_char
+                result_char = parts[3] 
                 
+                current_cell_state_on_opponent_board = opponent_board_data[r][c]
+
                 if result_char == 'H':
-                    status_bar_message = f"¡Impacto en ({r},{c})!"
-                    if hit_sound: hit_sound.play() # Sonido de nuestro acierto
-                    if check_if_opponent_is_defeated(opponent_board_data):
+                    # Solo marcar como 'H' si no es ya 'S' (parte de un barco ya confirmado hundido).
+                    # Si es 'S', significa que OPPONENT_SHIP_SUNK llegó primero para esta celda.
+                    if current_cell_state_on_opponent_board != 'S':
+                        opponent_board_data[r][c] = 'H'
+                    
+                    if hit_sound: hit_sound.play()
+
+                    # Chequear victoria DESPUÉS de actualizar el estado de la celda.
+                    is_victory = check_if_opponent_is_defeated(opponent_board_data)
+                    hits_count = 0 
+                    for r_debug in range(GRID_SIZE):
+                        for c_debug in range(GRID_SIZE):
+                            if opponent_board_data[r_debug][c_debug] == 'H' or opponent_board_data[r_debug][c_debug] == 'S':
+                                hits_count +=1
+                    print(f"DEBUG CLIENT (en UPDATE): Chequeando victoria. Celdas H/S oponente: {hits_count}/{TOTAL_SHIP_CELLS}. ¿Victoria?: {is_victory}")
+
+                    if is_victory and current_game_state != STATE_GAME_OVER:
+                        print(f"DEBUG CLIENT (en UPDATE): ¡Victoria local detectada! Enviando GAME_WON.")
                         send_message_to_server("GAME_WON")
-                        # No cambiar estado aquí, esperar GAME_OVER del servidor
-                        # TODO (Futuro): Si el servidor envía "OPPONENT_SUNK <ship_name>", reproducir sunk_sound aquí
-                    # y actualizar visualización del tablero enemigo.
-                else: # Miss
-                    status_bar_message = f"Agua en ({r},{c})."
-                    if miss_sound: miss_sound.play() # Sonido de nuestro fallo
+                        # No cambiar current_game_state aquí, esperar GAME_OVER del servidor.
+                
+                elif result_char == 'M':
+                    # Solo marcar como 'M' si no es 'S'. Un fallo no debería afectar un barco hundido.
+                    if current_cell_state_on_opponent_board != 'S':
+                        opponent_board_data[r][c] = 'M'
+                    status_bar_message = f"Agua en ({r},{c})." 
+                    if miss_sound: miss_sound.play()
                 
                 # El mensaje de status_bar_message se actualizará con YOUR_TURN_AGAIN o OPPONENT_TURN_MSG
+            elif command == "OPPONENT_SHIP_SUNK": 
+                try:
+                    ship_name = parts[1]
+                    flat_coords = [int(p) for p in parts[2:]]
+                    sunk_ship_coords_tuples = []
+                    for i in range(0, len(flat_coords), 2):
+                        sunk_ship_coords_tuples.append((flat_coords[i], flat_coords[i+1]))
 
+                    status_bar_message = f"¡Hundiste el {ship_name} del oponente!"
+                    print(f"INFO: Servidor informa: El {ship_name} del oponente en {sunk_ship_coords_tuples} ha sido hundido.")
+                    if sunk_sound: sunk_sound.play()
+
+                    sunk_ship_size = 0
+                    for cfg_name, cfg_size in SHIPS_CONFIG:
+                        if cfg_name == ship_name:
+                            sunk_ship_size = cfg_size
+                            break
+                    
+                    guessed_orientation = None
+                    if len(sunk_ship_coords_tuples) > 0:
+                        all_r_same = all(coord[0] == sunk_ship_coords_tuples[0][0] for coord in sunk_ship_coords_tuples)
+                        all_c_same = all(coord[1] == sunk_ship_coords_tuples[0][1] for coord in sunk_ship_coords_tuples)
+                        if all_r_same and not all_c_same : guessed_orientation = 'H'
+                        elif not all_r_same and all_c_same : guessed_orientation = 'V'
+                        elif sunk_ship_size == 1: guessed_orientation = 'H'
+
+                    opponent_sunk_ships_log.append({
+                        "name": ship_name, "size": sunk_ship_size,
+                        "coords": sunk_ship_coords_tuples, "orientation": guessed_orientation
+                    })
+
+                    # Marcar TODAS las celdas de este barco hundido como 'S'
+                    # Esto asegura que incluso la celda del último impacto sea 'S'.
+                    for r_s, c_s in sunk_ship_coords_tuples:
+                        if 0 <= r_s < GRID_SIZE and 0 <= c_s < GRID_SIZE:
+                            opponent_board_data[r_s][c_s] = 'S' 
+                    
+                    # AHORA, chequear victoria OTRA VEZ, ya que el estado 'S' es definitivo.
+                    is_victory_after_sunk = check_if_opponent_is_defeated(opponent_board_data)
+                    hits_count_after_sunk = 0
+                    for r_debug in range(GRID_SIZE):
+                        for c_debug in range(GRID_SIZE):
+                            if opponent_board_data[r_debug][c_debug] == 'H' or opponent_board_data[r_debug][c_debug] == 'S':
+                                hits_count_after_sunk +=1
+                    print(f"DEBUG CLIENT (en OPPONENT_SHIP_SUNK): Chequeando victoria. Celdas H/S oponente: {hits_count_after_sunk}/{TOTAL_SHIP_CELLS}. ¿Victoria?: {is_victory_after_sunk}")
+
+                    if is_victory_after_sunk and current_game_state != STATE_GAME_OVER:
+                        print(f"DEBUG CLIENT (en OPPONENT_SHIP_SUNK): ¡Victoria local detectada! Enviando GAME_WON.")
+                        send_message_to_server("GAME_WON")
+
+                except Exception as e:
+                    print(f"Error procesando OPPONENT_SHIP_SUNK: {e} - Datos: {message}")
 
             elif command == "YOUR_TURN_AGAIN": 
                 current_game_state = STATE_YOUR_TURN
@@ -254,72 +327,93 @@ def create_darkened_image(original_image_surface, darkness_alpha=128):
     darkened_surface.blit(overlay, (0, 0))
     return darkened_surface
 
-# --- NUEVA Función para Comprobar y Actualizar Barcos Hundidos (Propios) ---
+# --- Función check_and_update_my_sunk_ships ACTUALIZADA (sin cambios funcionales respecto a la última, solo el envío de mensaje) ---
 def check_and_update_my_sunk_ships():
-    global my_placed_ships_detailed, my_board_data, status_bar_message
-    a_ship_was_newly_sunk = False
+    global my_placed_ships_detailed, my_board_data, status_bar_message, sunk_sound
     for ship_info in my_placed_ships_detailed:
-        if not ship_info["is_sunk"]: # Solo chequear los que no están ya hundidos
+        if not ship_info["is_sunk"]: 
             hits_on_ship = 0
             for r_coord, c_coord in ship_info["coords"]:
                 if my_board_data[r_coord][c_coord] == 'H':
                     hits_on_ship += 1
-            
             if hits_on_ship == ship_info["size"]:
                 ship_info["is_sunk"] = True
-                a_ship_was_newly_sunk = True
                 sunk_ship_name = ship_info["name"]
                 print(f"INFO: ¡Mi {sunk_ship_name} ha sido hundido!")
-                # Actualizar mensaje de estado, pero podría ser sobreescrito rápidamente
-                # Es mejor si el mensaje principal de turno o acción toma precedencia.
-                # status_bar_message = f"¡Tu {sunk_ship_name} ha sido hundido!" 
-                if sunk_sound: 
-                    sunk_sound.play()
-                # Opcional: Enviar mensaje al servidor de que nuestro barco se hundió
-                # send_message_to_server(f"MY_SHIP_SUNK {sunk_ship_name}")
-    return a_ship_was_newly_sunk
+                coords_list_for_server = []
+                for r_s, c_s in ship_info["coords"]:
+                    coords_list_for_server.append(str(r_s))
+                    coords_list_for_server.append(str(c_s))
+                coords_payload_str = " ".join(coords_list_for_server)
+                send_message_to_server(f"I_SUNK_MY_SHIP {sunk_ship_name} {coords_payload_str}")
+                # print(f"DEBUG: Enviado I_SUNK_MY_SHIP {sunk_ship_name} con coords: {coords_payload_str}") # Ya lo tenías
+                if sunk_sound: sunk_sound.play()
 
 # --- Lógica y Dibujo de Pygame ---
 def draw_game_grid(surface, offset_x, offset_y, board_matrix, is_my_board):
-    # 1. Dibujar celdas de agua y rejilla
+    # 1. Dibujar celdas de agua y rejilla (sin cambios)
     for r_idx in range(GRID_SIZE):
         for c_idx in range(GRID_SIZE):
             cell_rect = pygame.Rect(offset_x + c_idx * CELL_SIZE, offset_y + r_idx * CELL_SIZE, CELL_SIZE, CELL_SIZE)
             pygame.draw.rect(surface, BLUE_WATER, cell_rect) 
             pygame.draw.rect(surface, BOARD_GRID_COLOR, cell_rect, 1) 
-    
-    # 2. Si es mi tablero, dibujar mis barcos (normales o hundidos)
+
+    # 2. Dibujar IMÁGENES de barcos (propios o del oponente hundidos)
+    # Esta sección se dibuja PRIMERO para que los marcadores H, M, S queden ENCIMA.
     if is_my_board:
         for ship_detail in my_placed_ships_detailed:
-            ship_name = ship_detail["base_image_key"] # Nombre para buscar en ship_images
+            # ... (lógica existente para dibujar tus imágenes de barcos, normales o hundidos/oscurecidos)
+            ship_name = ship_detail["base_image_key"] 
             orientation = ship_detail["orientation"]
             ship_img_dict = ship_images.get(ship_name)
-
             if ship_img_dict:
                 current_ship_image = ship_img_dict.get(orientation)
                 if current_ship_image:
-                    if ship_detail["is_sunk"]:
-                        # Crear y usar versión oscurecida
-                        image_to_draw = create_darkened_image(current_ship_image)
-                    else:
-                        image_to_draw = current_ship_image
-                    
+                    image_to_draw = create_darkened_image(current_ship_image) if ship_detail["is_sunk"] else current_ship_image
                     if image_to_draw and ship_detail.get("image_rect_on_board"):
-                        # image_rect_on_board tiene las coordenadas de pantalla correctas
                         surface.blit(image_to_draw, ship_detail["image_rect_on_board"].topleft)
+    else: # Es el tablero del oponente
+        for sunk_info in opponent_sunk_ships_log:
+            # ... (lógica existente para dibujar imágenes de barcos hundidos del oponente)
+            ship_name = sunk_info["name"]
+            orientation = sunk_info.get("orientation")
+            coords = sunk_info["coords"]
+            if not coords or orientation is None: continue
+            ship_img_data = ship_images.get(ship_name)
+            if ship_img_data:
+                base_image = ship_img_data.get(orientation)
+                if base_image:
+                    darkened_opponent_ship_img = create_darkened_image(base_image, darkness_alpha=150)
+                    if darkened_opponent_ship_img:
+                        min_r = min(r for r,c in coords)
+                        min_c = min(c for r,c in coords)
+                        screen_x = offset_x + min_c * CELL_SIZE
+                        screen_y = offset_y + min_r * CELL_SIZE
+                        surface.blit(darkened_opponent_ship_img, (screen_x, screen_y))
     
-    # 3. Dibujar impactos (H) y fallos (M) encima de todo
-    # Esto se hace iterando board_matrix, que contiene 'H' y 'M'
+    # 3. Dibujar MARCADORES de celda (H, M, S) ENCIMA de las imágenes
     for r_idx in range(GRID_SIZE):
         for c_idx in range(GRID_SIZE):
-            cell_val = board_matrix[r_idx][c_idx]
+            cell_val = board_matrix[r_idx][c_idx] 
             cell_rect = pygame.Rect(offset_x + c_idx * CELL_SIZE, offset_y + r_idx * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+            
             if cell_val == 'H': 
                 pygame.draw.line(surface, RED_HIT, (cell_rect.left + 5, cell_rect.top + 5), (cell_rect.right - 5, cell_rect.bottom - 5), 4)
                 pygame.draw.line(surface, RED_HIT, (cell_rect.left + 5, cell_rect.bottom - 5), (cell_rect.right - 5, cell_rect.top + 5), 4)
             elif cell_val == 'M': 
                 pygame.draw.circle(surface, YELLOW_MISS, cell_rect.center, CELL_SIZE // 4)
-            # NOTA: Ya no dibujamos '1' (barco genérico) aquí para `my_board` porque las imágenes lo cubren.
+            elif cell_val == 'S': 
+                # Fondo verde para depurar y resaltar
+                debug_fill_s = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
+                debug_fill_s.fill((0, 80, 0, 100)) # Verde oscuro semi-transparente
+                surface.blit(debug_fill_s, cell_rect.topleft)
+
+                line_thickness_sunk = 5 
+                padding_sunk = 5 
+                pygame.draw.line(surface, (255, 50, 50), (cell_rect.left + padding_sunk, cell_rect.top + padding_sunk), (cell_rect.right - padding_sunk, cell_rect.bottom - padding_sunk), line_thickness_sunk)
+                pygame.draw.line(surface, (255, 50, 50), (cell_rect.left + padding_sunk, cell_rect.bottom - padding_sunk), (cell_rect.right - padding_sunk, cell_rect.top + padding_sunk), line_thickness_sunk)
+                # print(f"DEBUG_DRAW: Dibujando 'S' marker (X gruesa + fondo verde) en celda ({r_idx},{c_idx})")
+
 
 def draw_text_on_screen(surface, text_content, position, font_to_use, color=TEXT_COLOR):
     text_surface = font_to_use.render(text_content, True, color)
@@ -420,13 +514,23 @@ def draw_ship_placement_preview(surface, mouse_pos):
                     img_rect_for_border = pygame.Rect(screen_x, screen_y, preview_img.get_width(), preview_img.get_height())
                     pygame.draw.rect(surface, border_color, img_rect_for_border, 2)
                     
+# --- check_if_opponent_is_defeated (YA MODIFICADA para contar H y S) ---
 def check_if_opponent_is_defeated(opponent_b):
-    hits_on_opponent = 0
+    hit_and_sunk_cells_on_opponent = 0
     for r in range(GRID_SIZE):
         for c in range(GRID_SIZE):
-            if opponent_b[r][c] == 'H':
-                hits_on_opponent += 1
-    return hits_on_opponent >= TOTAL_SHIP_CELLS
+            if opponent_b[r][c] == 'H' or opponent_b[r][c] == 'S': # Cuenta H y S
+                hit_and_sunk_cells_on_opponent += 1
+    if hit_and_sunk_cells_on_opponent >= TOTAL_SHIP_CELLS:
+        # El print de DEBUG ya está en los puntos de llamada
+        return True
+    return False
+    
+    # Comprobar si el total de celdas impactadas/hundidas alcanza el total de celdas de todos los barcos
+    if hit_and_sunk_cells_on_opponent >= TOTAL_SHIP_CELLS:
+        print(f"DEBUG: ¡Victoria detectada! Celdas impactadas/hundidas: {hit_and_sunk_cells_on_opponent}/{TOTAL_SHIP_CELLS}")
+        return True
+    return False
 
 def game_main_loop():
     global screen, font_large, font_medium, font_small, current_game_state, status_bar_message

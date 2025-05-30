@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 
-HOST = '172.24.43.50'
+HOST = "169.254.107.4"
 PORT = 8080
 
 # --- Estado del Servidor ---
@@ -191,39 +191,68 @@ def handle_client_connection(conn, player_id):
                             try: clients[other_player_for_turn_notify]['conn'].sendall(b"OPPONENT_TURN_MSG")
                             except Exception as e: print(f"Error enviando OPPONENT_TURN_MSG a {other_player_for_turn_notify}: {e}")
                         print(f"Fallo de {original_shooter_id}. Turno para {current_turn_player_id}.")
-            
-            elif command == "GAME_WON":
-                if not game_active: 
-                    print(f"DEBUG [{player_id}]: GAME_WON ignorado porque 'game_active' es False.")
-                    continue 
+                        
+            elif command == "I_SUNK_MY_SHIP": # NUEVO COMANDO
+                if not game_active:
+                    print(f"DEBUG [{player_id}]: I_SUNK_MY_SHIP ignorado, juego no activo.")
+                    continue
                 
-                winner_id = player_id
-                loser_id = "P2" if winner_id == "P1" else "P1"
-                print(f"Comando GAME_WON recibido de {winner_id}. Terminando juego.")
-                with turn_lock: # Es importante asegurar que game_active y current_turn se modifiquen atomicamente
-                    if game_active : # Solo si no fue ya puesto a False por otro medio
-                        game_active = False 
-                        current_turn_player_id = None 
-                    else: # El juego ya estaba marcado como inactivo, no hacer nada más aquí
-                        print(f"DEBUG [{player_id}]: GAME_WON procesado, pero 'game_active' ya era False.")
-                        break # Salir del bucle si el juego ya terminó
+                try:
+                    ship_name = parts[1]
+                    # parts[2:] contendrá todas las coordenadas como strings ['r1', 'c1', 'r2', 'c2', ...]
+                    # Las unimos de nuevo para pasarlas tal cual al otro cliente.
+                    coords_str_payload = " ".join(parts[2:]) 
+                    print(f"DEBUG [{player_id}]: Recibido I_SUNK_MY_SHIP para {ship_name} con coords payload: '{coords_str_payload}'")
 
-                # Enviar mensajes de fin de juego fuera del lock de turnos
-                # pero después de que game_active ha sido puesto a False.
-                if winner_id in clients and clients[winner_id].get('conn'):
-                    try: clients[winner_id]['conn'].sendall(b"GAME_OVER WIN"); print(f"Enviado GAME_OVER WIN a {winner_id}")
-                    except Exception as e: print(f"Error enviando GAME_OVER WIN a {winner_id}: {e}")
-                
-                if loser_id in clients and clients[loser_id].get('conn'):
-                    try: clients[loser_id]['conn'].sendall(b"GAME_OVER LOSE"); print(f"Enviado GAME_OVER LOSE a {loser_id}")
-                    except Exception as e: print(f"Error enviando GAME_OVER LOSE a {loser_id}: {e}")
-                
-                time.sleep(0.5) 
-                print(f"DEBUG [{player_id}]: Hilo del ganador ({winner_id}) terminando después de GAME_WON.")
-                break # Hilo del ganador termina. El hilo del perdedor terminará por desconexión del cliente o error.
-            
-            else:
-                print(f"WARN [{player_id}]: Comando desconocido o no manejable en el estado actual: '{command}'")
+
+                    # Este mensaje viene del jugador CUYO barco fue hundido (player_id).
+                    # Necesitamos notificar al OTRO jugador (el que disparó).
+                    shooter_player_id = "P2" if player_id == "P1" else "P1"
+                    
+                    notification_msg = f"OPPONENT_SHIP_SUNK {ship_name} {coords_str_payload}"
+                    
+                    if shooter_player_id in clients and clients[shooter_player_id].get('conn'):
+                        try:
+                            clients[shooter_player_id]['conn'].sendall(notification_msg.encode())
+                            print(f"INFO [{player_id}]: Notificado a {shooter_player_id} que hundió un {ship_name} del oponente.")
+                        except Exception as e:
+                            print(f"ERROR [{player_id}]: Fallo al enviar OPPONENT_SHIP_SUNK a {shooter_player_id}: {e}")
+                    else:
+                        print(f"WARN [{player_id}]: No se pudo notificar a {shooter_player_id} sobre el hundimiento (no conectado o no encontrado).")
+                except IndexError:
+                    print(f"ERROR [{player_id}]: Comando I_SUNK_MY_SHIP malformado: {data}")
+                except Exception as e:
+                    print(f"ERROR [{player_id}]: Excepción procesando I_SUNK_MY_SHIP: {e}")
+                    
+            elif command == "GAME_WON":
+                print(f"DEBUG SERVER [{player_id}]: Comando GAME_WON recibido. Estado actual de 'game_active': {game_active}") # DEBUG
+                if game_active: 
+                    winner_id = player_id
+                    loser_id = "P2" if winner_id == "P1" else "P1"
+                    print(f"INFO [{player_id}]: Procesando GAME_WON. Ganador: {winner_id}, Perdedor: {loser_id}.")
+                    with turn_lock:
+                        if game_active : 
+                            game_active = False 
+                            current_turn_player_id = None 
+                        else:
+                            print(f"DEBUG SERVER [{player_id}]: GAME_WON procesado, pero 'game_active' ya era False dentro del lock. No se enviarán mensajes GAME_OVER desde aquí.")
+                            break # El juego ya terminó por otro medio
+                    
+                    # Enviar mensajes de fin de juego (asegurarse que game_active fue puesto a False ANTES de esto por este hilo)
+                    # Es posible que el otro hilo (del perdedor) termine por desconexión del cliente al recibir GAME_OVER LOSE.
+                    if winner_id in clients and clients[winner_id].get('conn'):
+                        try: clients[winner_id]['conn'].sendall(b"GAME_OVER WIN"); print(f"DEBUG SERVER [{player_id}]: Enviado GAME_OVER WIN a {winner_id}")
+                        except Exception as e: print(f"ERROR SERVER [{player_id}]: Fallo al enviar GAME_OVER WIN a {winner_id}: {e}")
+                    
+                    if loser_id in clients and clients[loser_id].get('conn'):
+                        try: clients[loser_id]['conn'].sendall(b"GAME_OVER LOSE"); print(f"DEBUG SERVER [{player_id}]: Enviado GAME_OVER LOSE a {loser_id}")
+                        except Exception as e: print(f"ERROR SERVER [{player_id}]: Fallo al enviar GAME_OVER LOSE a {loser_id}: {e}")
+                    
+                    time.sleep(0.5) 
+                    print(f"DEBUG SERVER [{player_id}]: Hilo del jugador {winner_id} terminando después de procesar GAME_WON.")
+                    break 
+                else:
+                    print(f"WARN SERVER [{player_id}]: GAME_WON ignorado porque 'game_active' es False.")
 
     except ConnectionResetError:
         print(f"Jugador {player_id} ha reseteado la conexion.")
