@@ -7,7 +7,7 @@ import time
 import os # Para construir rutas a los archivos de sonido
 
 # --- Configuración de Conexión ---
-SERVER_IP = "169.254.107.4"
+SERVER_IP = "192.168.1.105"
 PORT = 8080
 
 # --- Configuración de Pygame ---
@@ -91,12 +91,70 @@ miss_sound = None
 sunk_sound = None # NUEVO
 
 # --- Comunicación con el Servidor ---
+player_name = ""  # Nuevo: nombre del jugador
+opponent_name = ""  # Nuevo: nombre del oponente
+
+def prompt_for_player_name():
+    """Muestra una pantalla para que el usuario escriba su nombre antes de conectarse."""
+    global screen, font_large, font_medium, font_small
+    pygame.init()
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption("Batalla Naval - Ingresa tu nombre")
+    font_large = pygame.font.Font(None, 48)
+    font_medium = pygame.font.Font(None, 36)
+    font_small = pygame.font.Font(None, 28)
+    input_box = pygame.Rect(SCREEN_WIDTH // 2 - 150, SCREEN_HEIGHT // 2, 300, 48)
+    color_inactive = pygame.Color('lightskyblue3')
+    color_active = pygame.Color('dodgerblue2')
+    color = color_inactive
+    active = False
+    text = ""
+    done = False
+
+    while not done:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if input_box.collidepoint(event.pos):
+                    active = not active
+                else:
+                    active = False
+                color = color_active if active else color_inactive
+            if event.type == pygame.KEYDOWN:
+                if active:
+                    if event.key == pygame.K_RETURN:
+                        if text.strip():
+                            done = True
+                    elif event.key == pygame.K_BACKSPACE:
+                        text = text[:-1]
+                    elif len(text) < 20 and event.unicode.isprintable():
+                        text += event.unicode
+
+        screen.fill(BLACK)
+        draw_text_on_screen(screen, "Ingresa tu nombre:", (SCREEN_WIDTH // 2 - 150, SCREEN_HEIGHT // 2 - 60), font_medium)
+        txt_surface = font_large.render(text, True, color)
+        width = max(300, txt_surface.get_width()+10)
+        input_box.w = width
+        screen.blit(txt_surface, (input_box.x+5, input_box.y+5))
+        pygame.draw.rect(screen, color, input_box, 2)
+        draw_text_on_screen(screen, "Presiona Enter para continuar", (SCREEN_WIDTH // 2 - 150, SCREEN_HEIGHT // 2 + 60), font_small)
+        pygame.display.flip()
+    return text.strip()
+
 def connect_to_server_thread():
-    global client_socket, current_game_state, status_bar_message, player_id_str
+    global client_socket, current_game_state, status_bar_message, player_id_str, player_name
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         print(f"Intentando conectar a {SERVER_IP}:{PORT}...")
         client_socket.connect((SERVER_IP, PORT))
+        # Enviar el nombre del jugador al servidor
+        if player_name:
+            try:
+                client_socket.sendall(f"PLAYER_NAME {player_name}".encode())
+            except Exception as e:
+                print(f"Error enviando nombre de jugador: {e}")
         status_bar_message = "Conectado. Esperando asignacion..."
         threading.Thread(target=listen_for_server_messages, daemon=True).start()
     except ConnectionRefusedError:
@@ -109,7 +167,7 @@ def connect_to_server_thread():
 def listen_for_server_messages():
     global current_game_state, status_bar_message, player_id_str, my_board_data, opponent_board_data, client_socket
     global opponent_sunk_ships_log # Asegurar acceso global
-    
+    global opponent_name
     # Bucle mientras el juego no haya terminado Y el socket exista
     while current_game_state != STATE_GAME_OVER and client_socket: 
         try:
@@ -121,7 +179,7 @@ def listen_for_server_messages():
                 break 
             
             message = data_bytes.decode()
-            # print(f"Servidor dice: {message}") # Descomentar para depuración detallada de mensajes
+            print(f"Servidor dice: {message}")
             parts = message.split()
             command = parts[0]
 
@@ -129,6 +187,9 @@ def listen_for_server_messages():
                 status_bar_message = ' '.join(parts[1:])
             elif command == "PLAYER_ID":
                 player_id_str = parts[1]
+            elif command == "OPPONENT_NAME":
+                # Recibir el nombre del oponente
+                opponent_name = ' '.join(parts[1:])
             elif command == "SETUP_YOUR_BOARD":
                 current_game_state = STATE_SETUP_SHIPS
                 status_bar_message = f"{player_id_str}: Coloca tus barcos. 'R' para rotar. Click para colocar."
@@ -534,11 +595,13 @@ def check_if_opponent_is_defeated(opponent_b):
 
 def game_main_loop():
     global screen, font_large, font_medium, font_small, current_game_state, status_bar_message
-    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound,sunk_sound, client_socket
-    global ship_images # Para que sea accesible
-    
+    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound, client_socket, player_name, opponent_name
+
     if len(sys.argv) > 1: SERVER_IP = sys.argv[1]
     print(f"Usando IP del servidor: {SERVER_IP}")
+
+    # --- Pedir nombre antes de inicializar el juego ---
+    player_name = prompt_for_player_name()
 
     pygame.init()
     
@@ -614,7 +677,6 @@ def game_main_loop():
     game_clock = pygame.time.Clock()
 
     while is_game_running:
-        # ... (resto del bucle principal) ...
         mouse_current_pos = pygame.mouse.get_pos()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -643,6 +705,8 @@ def game_main_loop():
                             status_bar_message = f"Coloca: {next_ship_name_display}. Orient: {orientation_text}. 'R' para rotar."
         
         screen.fill(BLACK)
+        # Mostrar el nombre del oponente en la interfaz
+        draw_text_on_screen(screen, f"Oponente: {opponent_name or '---'}", (SCREEN_WIDTH - 250, 10), font_small)
         draw_text_on_screen(screen, f"TU FLOTA ({player_id_str or '---'})", (BOARD_OFFSET_X_MY, BOARD_OFFSET_Y - 40), font_medium)
         draw_text_on_screen(screen, "FLOTA ENEMIGA", (BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y - 40), font_medium)
         
