@@ -81,9 +81,9 @@ def crear_partida_menu():
 def obtener_partidas_disponibles():
     """
     Solicita al servidor la lista de partidas disponibles.
-    Retorna una lista de diccionarios con 'nombre_creador' e 'id'.
+    Retorna una lista de diccionarios con 'nombre_creador', 'id', 'jugadores_conectados', 'max_jugadores'.
     """
-    SERVER_HOST = "169.254.110.221"
+    SERVER_HOST = "172.23.43.50"
     SERVER_PORT = 8080
     partidas = []
     try:
@@ -94,9 +94,15 @@ def obtener_partidas_disponibles():
                 games_str = data[len("GAMES_LIST "):]
                 if games_str.strip():
                     for item in games_str.split(";"):
-                        if "|" in item:
-                            nombre, id_str = item.split("|")
-                            partidas.append({"nombre_creador": nombre, "id": int(id_str)})
+                        campos = item.split("|")
+                        if len(campos) >= 4:
+                            nombre, id_str, conectados_str, max_jugadores_str = campos[:4]
+                            partidas.append({
+                                "nombre_creador": nombre,
+                                "id": int(id_str),
+                                "jugadores_conectados": int(conectados_str),
+                                "max_jugadores": int(max_jugadores_str)
+                            })
     except Exception as e:
         print(f"Error obteniendo partidas del servidor: {e}")
     return partidas
@@ -142,7 +148,7 @@ def unirse_partida_menu():
             btn_rect = pygame.Rect((SCREEN_WIDTH - button_width)//2, y, button_width, button_height)
             partida_buttons.append((btn_rect, partida))
             is_hovered = btn_rect.collidepoint(mouse_pos)
-            texto = f"Creador: {partida['nombre_creador']}"
+            texto = f"Creador: {partida['nombre_creador']} ({partida['jugadores_conectados']}/{partida['max_jugadores']} jugadores)"
             draw_button(screen, btn_rect, texto, font_button, is_hovered)
 
         pygame.display.flip()
