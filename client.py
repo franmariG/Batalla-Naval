@@ -7,7 +7,7 @@ import time
 import os # Para construir rutas a los archivos de sonido
 
 # --- Configuración de Conexión ---
-SERVER_IP = "172.23.43.50"
+SERVER_IP = "169.254.110.221"
 PORT = 8080
 
 # --- Configuración de Pygame ---
@@ -168,6 +168,9 @@ def listen_for_server_messages():
     global current_game_state, status_bar_message, player_id_str, my_board_data, opponent_board_data, client_socket
     global opponent_sunk_ships_log # Asegurar acceso global
     global opponent_name
+    
+    # Búfer para almacenar datos incompletos del servidor
+    data_buffer = ""
     # Bucle mientras el juego no haya terminado Y el socket exista
     while current_game_state != STATE_GAME_OVER and client_socket: 
         try:
@@ -178,17 +181,30 @@ def listen_for_server_messages():
                     current_game_state = STATE_GAME_OVER
                 break 
             
-            message = data_bytes.decode()
-            print(f"Servidor dice: {message}")
-            parts = message.split()
-            command = parts[0]
+            # Añadir los nuevos datos al búfer
+            data_buffer += data_bytes.decode()
+            
+           # Procesar todos los mensajes completos (separados por nueva línea)
+            # El servidor debería enviar cada mensaje terminado con \n
+            while '\n' in data_buffer:
+                # Extraer el primer mensaje completo y quitarlo del búfer
+                message, data_buffer = data_buffer.split('\n', 1)
+                message = message.strip() # Limpiar espacios en blanco
+                if not message:
+                    continue
+
+                print(f"Servidor dice: {message}")
+                parts = message.split()
+                if not parts:
+                    continue
+                command = parts[0]
+
 
             if command == "MSG":
-                status_bar_message = ' '.join(parts[1:])
+                    status_bar_message = ' '.join(parts[1:])
             elif command == "PLAYER_ID":
                 player_id_str = parts[1]
             elif command == "OPPONENT_NAME":
-                # Recibir el nombre del oponente
                 opponent_name = ' '.join(parts[1:])
             elif command == "SETUP_YOUR_BOARD":
                 current_game_state = STATE_SETUP_SHIPS
@@ -197,7 +213,7 @@ def listen_for_server_messages():
                 starting_player = parts[1]
                 if starting_player == player_id_str:
                     current_game_state = STATE_YOUR_TURN
-                    status_bar_message = "¡Tu turno! Dispara en el tablero enemigo."
+                    status_bar_message = "¡Tu turno! Dispara en el tablero enemigo." 
                 else:
                     current_game_state = STATE_OPPONENT_TURN
                     status_bar_message = f"Turno del oponente ({starting_player}). Esperando..."

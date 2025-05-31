@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 
-HOST = "172.23.43.50"
+HOST = "169.254.110.221"
 PORT = 8080
 
 # --- Estado del Servidor ---
@@ -21,34 +21,31 @@ def notify_other_player(sender_player_id, message_bytes):
         except Exception as e:
             print(f"Error notificando a {receiver_player_id}: {e}")
 
-# server.py
-# ... (mantén el resto de tu server.py igual: imports, HOST, PORT, globals, notify_other_player, player_id_exists_in_clients_dict)
-# ... (ASEGÚRATE DE TENER LAS DEFINICIONES GLOBALES DE: clients, player_setup_complete, game_active, current_turn_player_id, turn_lock)
-
-def handle_client_connection(conn, player_id):
+# Añade 'initial_bytes=None' al final de los argumentos
+def handle_client_connection(conn, player_id, initial_bytes=None):
     global game_active, current_turn_player_id, player_setup_complete, clients
 
     print(f"Jugador {player_id} ({clients[player_id]['addr']}) conectado.")
     try:
-        # Esperar si el cliente envía el nombre primero
-        conn.settimeout(2.0)
-        try:
-            initial_bytes = conn.recv(1024)
-            if initial_bytes:
-                initial_msg = initial_bytes.decode().strip()
-                if initial_msg.startswith("PLAYER_NAME "):
-                    player_name = initial_msg[len("PLAYER_NAME "):].strip()
-                    clients[player_id]['name'] = player_name
-                    print(f"Nombre recibido de {player_id}: {player_name}")
-                else:
-                    clients[player_id]['name'] = f"Jugador {player_id}"
+        # ELIMINA el bloque try/except que leía con timeout.
+        # Lo reemplazamos con el procesamiento del 'initial_bytes' que recibimos.
+
+        # NUEVO BLOQUE para procesar los bytes iniciales
+        if initial_bytes:
+            initial_msg = initial_bytes.decode().strip()
+            if initial_msg.startswith("PLAYER_NAME "):
+                player_name = initial_msg[len("PLAYER_NAME "):].strip()
+                clients[player_id]['name'] = player_name
+                print(f"Nombre recibido de {player_id}: {player_name}") # ¡Esto ahora debería funcionar!
             else:
+                # Si el primer mensaje no es el nombre, asignamos uno por defecto
                 clients[player_id]['name'] = f"Jugador {player_id}"
-        except socket.timeout:
+        else:
+            # Si no hubo bytes iniciales (no debería pasar), asignamos por defecto
             clients[player_id]['name'] = f"Jugador {player_id}"
-        finally:
-            conn.settimeout(None)
-        conn.sendall(f"PLAYER_ID {player_id}".encode())
+
+        conn.settimeout(None) # Nos aseguramos que el timeout se quite
+        conn.sendall(f"PLAYER_ID {player_id}\n".encode()) # <-- Añadido \n
         time.sleep(0.1)
 
         # Esperar a que ambos jugadores estén conectados y tengan nombre
@@ -59,7 +56,7 @@ def handle_client_connection(conn, player_id):
                 print(f"DEBUG [{player_id}]: Jugador desconectado mientras esperaba al otro. Terminando hilo de espera.")
                 return 
             if not game_active:
-                conn.sendall(b"MSG Esperando al otro jugador...")
+                conn.sendall(b"MSG Esperando al otro jugador...\n")
             if wait_loops % 5 == 0:
                 print(f"DEBUG [{player_id}]: Sigue esperando al otro jugador/nombres (lleva {wait_loops}s). Clientes actuales: {list(clients.keys())}")
             time.sleep(1)
@@ -68,7 +65,7 @@ def handle_client_connection(conn, player_id):
         other_id = "P2" if player_id == "P1" else "P1"
         opponent_name = clients[other_id].get('name', f"Jugador {other_id}")
         try:
-            conn.sendall(f"OPPONENT_NAME {opponent_name}".encode())
+            conn.sendall(f"OPPONENT_NAME {opponent_name}\n".encode())
         except Exception as e:
             print(f"Error enviando nombre del oponente a {player_id}: {e}")
 
@@ -80,7 +77,7 @@ def handle_client_connection(conn, player_id):
                 print(f"DEBUG [{player_id}]: Jugador desconectado mientras esperaba al otro. Terminando hilo de espera.")
                 return 
             if not game_active: # Solo enviar si el juego no ha empezado o terminado
-                 conn.sendall(b"MSG Esperando al otro jugador...")
+                 conn.sendall(b"MSG Esperando al otro jugador...\n")
             
             # Para evitar un log spam si un jugador espera mucho y el otro tarda o no conecta
             if wait_loops % 5 == 0: # Imprime cada 5 segundos aprox
@@ -94,7 +91,7 @@ def handle_client_connection(conn, player_id):
         # Solo enviar SETUP_YOUR_BOARD si este jugador no ha completado el setup y ambos están conectados
         # player_setup_complete.get(player_id, False) es más seguro que player_setup_complete[player_id]
         if len(clients) == 2 and not player_setup_complete.get(player_id, False):
-             conn.sendall(b"SETUP_YOUR_BOARD")
+             conn.sendall(b"SETUP_YOUR_BOARD\n")
              print(f"DEBUG [{player_id}]: Enviado SETUP_YOUR_BOARD.")
     except socket.error as e:
         print(f"Error de socket inicial con {player_id} (probablemente desconectado): {e}")
@@ -140,7 +137,7 @@ def handle_client_connection(conn, player_id):
                 notify_other_player(player_id, status_msg_for_other.encode())
                 
                 try:
-                    conn.sendall(b"MSG Esperando que el oponente termine la configuracion...")
+                    conn.sendall(b"MSG Esperando que el oponente termine la configuracion...\n")
                 except socket.error:
                     print(f"DEBUG [{player_id}]: Error al enviar 'MSG Esperando...' (probablemente desconectado).")
                     break 
@@ -189,13 +186,13 @@ def handle_client_connection(conn, player_id):
             elif command == "SHOT":
                 if not game_active:
                     print(f"DEBUG [{player_id}]: SHOT ignorado porque 'game_active' es False.")
-                    try: conn.sendall(b"MSG El juego no ha comenzado o ya termino.")
+                    try: conn.sendall(b"MSG El juego no ha comenzado o ya termino.\n")
                     except: pass
                     continue
                 
                 if current_turn_player_id != player_id:
                     print(f"DEBUG [{player_id}]: SHOT ignorado porque no es su turno (es de {current_turn_player_id}).")
-                    try: conn.sendall(b"MSG No es tu turno.")
+                    try: conn.sendall(b"MSG No es tu turno.\n")
                     except: pass
                     continue
                 
@@ -381,7 +378,7 @@ def handle_list_games_request(conn):
     games = get_available_games()
     games_str = ";".join([f"{g['nombre_creador']}|{g['id']}" for g in games])
     try:
-        conn.sendall(f"GAMES_LIST {games_str}".encode())
+        conn.sendall(f"GAMES_LIST {games_str}\n".encode())
     except Exception as e:
         print(f"Error enviando GAMES_LIST: {e}")
     finally:
@@ -420,45 +417,41 @@ def start_server():
                 print(f"Error aceptando conexión: {e}")
                 continue
 
-            # --- NUEVO: Manejar conexiones de solo consulta (LIST_GAMES) ---
+            initial_bytes = None
             try:
-                conn.settimeout(2.0)
-                first_bytes = conn.recv(1024)
-                if first_bytes:
-                    first_msg = first_bytes.decode().strip()
-                    if first_msg == "LIST_GAMES":
-                        handle_list_games_request(conn)
-                        continue  # No crear hilo de juego para esta conexión
-                    else:
-                        # Si no es LIST_GAMES, devolver el buffer al flujo normal
-                        # (No es necesario, simplemente sigue el flujo normal)
-                        pass
-                conn.settimeout(None)
+                conn.settimeout(0.5)  # Un timeout corto solo para ver si hay datos inmediatos
+                initial_bytes = conn.recv(1024)
+                conn.settimeout(None) # Quitar el timeout inmediatamente
             except socket.timeout:
                 conn.settimeout(None)
-                # Si no se recibe nada, cerrar la conexión
-                try: conn.close()
-                except: pass
+                # Si no hay datos, probablemente sea una conexión inválida, la cerramos.
+                print(f"Conexión de {addr} sin datos iniciales. Cerrando.")
+                conn.close()
                 continue
             except Exception as e:
                 print(f"Error en pre-handle de conexión: {e}")
-                try: conn.close()
-                except: pass
+                conn.close()
                 continue
 
+            if initial_bytes:
+                first_msg = initial_bytes.decode().strip()
+                if first_msg == "LIST_GAMES":
+                    handle_list_games_request(conn)
+                    continue  # Procesa y espera la siguiente conexión
+
+            # Si no fue LIST_GAMES, es una conexión de juego.
+            # Asignar player_id...
             assigned_player_id = None
-            # Asignar P1 si no está, luego P2 si no está.
             if "P1" not in clients:
                 assigned_player_id = "P1"
-            elif "P2" not in clients: # Implies P1 está en clients
+            elif "P2" not in clients:
                 assigned_player_id = "P2"
-            
-            if assigned_player_id:
-                # Reiniciar estado de setup para el nuevo jugador si es necesario
-                player_setup_complete[assigned_player_id] = False
 
+            if assigned_player_id:
+                player_setup_complete[assigned_player_id] = False
                 clients[assigned_player_id] = {'conn': conn, 'addr': addr}
-                thread = threading.Thread(target=handle_client_connection, args=(conn, assigned_player_id), daemon=True)
+                # Pasamos los bytes iniciales al hilo
+                thread = threading.Thread(target=handle_client_connection, args=(conn, assigned_player_id, initial_bytes), daemon=True)
                 thread.start()
                 
                 if len(clients) == 2:
@@ -467,7 +460,7 @@ def start_server():
                 # No debería llegar aquí si len(clients) < 2, pero por si acaso.
                 print(f"Conexión de {addr} rechazada, slots P1/P2 ocupados o estado inconsistente.")
                 try:
-                    conn.sendall(b"MSG Servidor actualmente lleno o en mantenimiento. Intenta mas tarde.")
+                    conn.sendall(b"MSG Servidor actualmente lleno o en mantenimiento. Intenta mas tarde.\n")
                     conn.close()
                 except: pass
         else:

@@ -83,7 +83,7 @@ def obtener_partidas_disponibles():
     Solicita al servidor la lista de partidas disponibles.
     Retorna una lista de diccionarios con 'nombre_creador' e 'id'.
     """
-    SERVER_HOST = "172.23.43.50"
+    SERVER_HOST = "169.254.110.221"
     SERVER_PORT = 8080
     partidas = []
     try:
