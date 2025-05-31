@@ -380,7 +380,11 @@ def listen_for_server_messages():
 def send_message_to_server(message):
     if client_socket and client_socket.fileno() != -1: # Chequear si el socket no está cerrado
         try:
-            client_socket.sendall(message.encode())
+            # ANTES:
+            # client_socket.sendall(message.encode())
+
+            # AHORA (añadimos f-string y \n):
+            client_socket.sendall(f"{message}\n".encode())
         except socket.error as e:
             print(f"Error enviando mensaje: {e}")
             global status_bar_message, current_game_state

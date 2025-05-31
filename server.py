@@ -96,7 +96,6 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
     except socket.error as e:
         print(f"Error de socket inicial con {player_id} (probablemente desconectado): {e}")
         return 
-
     try:
         while True: 
             data_bytes = conn.recv(1024)
@@ -133,7 +132,7 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                 player_setup_complete[player_id] = True
                 print(f"DEBUG [{player_id}]: Marcado como listo. player_setup_complete: {player_setup_complete}")
                 
-                status_msg_for_other = f"MSG El jugador {player_id} ha terminado de colocar sus barcos."
+                status_msg_for_other = f"MSG El jugador {player_id} ha terminado de colocar sus barcos.\n"
                 notify_other_player(player_id, status_msg_for_other.encode())
                 
                 try:
@@ -157,7 +156,7 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                             
                             conn_p1 = clients.get("P1", {}).get('conn')
                             conn_p2 = clients.get("P2", {}).get('conn')
-                            start_game_msg_bytes = f"START_GAME {current_turn_player_id}".encode()
+                            start_game_msg_bytes = f"START_GAME {current_turn_player_id}\n".encode()
                             error_sending_start = False
 
                             if conn_p1:
@@ -196,7 +195,7 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     except: pass
                     continue
                 
-                shot_data_to_other = f"SHOT {parts[1]} {parts[2]}"
+                shot_data_to_other = f"SHOT {parts[1]} {parts[2]}\n"
                 notify_other_player(player_id, shot_data_to_other.encode())
                 print(f"[{player_id}] disparo a ({parts[1]},{parts[2]}). Enviando al oponente.")
 
@@ -206,7 +205,7 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     continue
                 
                 original_shooter_id = "P2" if player_id == "P1" else "P1"
-                update_message_for_shooter = f"UPDATE {parts[1]} {parts[2]} {parts[3]}"
+                update_message_for_shooter = f"UPDATE {parts[1]} {parts[2]} {parts[3]}\n"
                 if original_shooter_id in clients and clients[original_shooter_id].get('conn'):
                     try: clients[original_shooter_id]['conn'].sendall(update_message_for_shooter.encode())
                     except Exception as e: print(f"Error enviando UPDATE a {original_shooter_id}: {e}")
@@ -217,21 +216,21 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     if result_char == 'H': 
                         current_turn_player_id = original_shooter_id 
                         if current_turn_player_id in clients and clients[current_turn_player_id].get('conn'):
-                            try: clients[current_turn_player_id]['conn'].sendall(b"YOUR_TURN_AGAIN")
+                            try: clients[current_turn_player_id]['conn'].sendall(b"YOUR_TURN_AGAIN\n")
                             except Exception as e: print(f"Error enviando YOUR_TURN_AGAIN a {current_turn_player_id}: {e}")
                         player_who_was_hit_id = player_id
                         if player_who_was_hit_id in clients and clients[player_who_was_hit_id].get('conn'):
-                             try: clients[player_who_was_hit_id]['conn'].sendall(b"OPPONENT_TURN_MSG") 
+                             try: clients[player_who_was_hit_id]['conn'].sendall(b"OPPONENT_TURN_MSG\n") 
                              except Exception as e: print(f"Error enviando OPPONENT_TURN_MSG a {player_who_was_hit_id}: {e}")
                         print(f"Impacto de {original_shooter_id}. {original_shooter_id} sigue jugando.")
                     else: 
                         current_turn_player_id = player_id 
                         if current_turn_player_id in clients and clients[current_turn_player_id].get('conn'):
-                             try: clients[current_turn_player_id]['conn'].sendall(b"YOUR_TURN_AGAIN")
+                             try: clients[current_turn_player_id]['conn'].sendall(b"YOUR_TURN_AGAIN\n")
                              except Exception as e: print(f"Error enviando YOUR_TURN_AGAIN a {current_turn_player_id}: {e}")
                         other_player_for_turn_notify = original_shooter_id
                         if other_player_for_turn_notify in clients and clients[other_player_for_turn_notify].get('conn'):
-                            try: clients[other_player_for_turn_notify]['conn'].sendall(b"OPPONENT_TURN_MSG")
+                            try: clients[other_player_for_turn_notify]['conn'].sendall(b"OPPONENT_TURN_MSG\n")
                             except Exception as e: print(f"Error enviando OPPONENT_TURN_MSG a {other_player_for_turn_notify}: {e}")
                         print(f"Fallo de {original_shooter_id}. Turno para {current_turn_player_id}.")
                         
@@ -252,7 +251,7 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     # Necesitamos notificar al OTRO jugador (el que disparó).
                     shooter_player_id = "P2" if player_id == "P1" else "P1"
                     
-                    notification_msg = f"OPPONENT_SHIP_SUNK {ship_name} {coords_str_payload}"
+                    notification_msg = f"OPPONENT_SHIP_SUNK {ship_name} {coords_str_payload}\n"
                     
                     if shooter_player_id in clients and clients[shooter_player_id].get('conn'):
                         try:
@@ -284,11 +283,11 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     # Enviar mensajes de fin de juego (asegurarse que game_active fue puesto a False ANTES de esto por este hilo)
                     # Es posible que el otro hilo (del perdedor) termine por desconexión del cliente al recibir GAME_OVER LOSE.
                     if winner_id in clients and clients[winner_id].get('conn'):
-                        try: clients[winner_id]['conn'].sendall(b"GAME_OVER WIN"); print(f"DEBUG SERVER [{player_id}]: Enviado GAME_OVER WIN a {winner_id}")
+                        try: clients[winner_id]['conn'].sendall(b"GAME_OVER WIN\n"); print(f"DEBUG SERVER [{player_id}]: Enviado GAME_OVER WIN a {winner_id}")
                         except Exception as e: print(f"ERROR SERVER [{player_id}]: Fallo al enviar GAME_OVER WIN a {winner_id}: {e}")
                     
                     if loser_id in clients and clients[loser_id].get('conn'):
-                        try: clients[loser_id]['conn'].sendall(b"GAME_OVER LOSE"); print(f"DEBUG SERVER [{player_id}]: Enviado GAME_OVER LOSE a {loser_id}")
+                        try: clients[loser_id]['conn'].sendall(b"GAME_OVER LOSE\n"); print(f"DEBUG SERVER [{player_id}]: Enviado GAME_OVER LOSE a {loser_id}")
                         except Exception as e: print(f"ERROR SERVER [{player_id}]: Fallo al enviar GAME_OVER LOSE a {loser_id}: {e}")
                     
                     time.sleep(0.5) 
