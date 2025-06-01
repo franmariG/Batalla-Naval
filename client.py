@@ -875,7 +875,7 @@ is_team_board_slave = False
 
 def game_main_loop():
     global screen, font_large, font_medium, font_small, current_game_state, status_bar_message
-    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound, client_socket
+    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound, sunk_sound, client_socket
     global g_my_team_name, g_opponent_team_name # Añadir las nuevas globales
     global is_team_board_slave, player_id_str # is_team_board_slave ya existía
 
