@@ -4,7 +4,7 @@ import threading
 import time
 
 # Usar la IP del servidor 
-HOST = "172.23.43.50" # Asegúrate que sea la IP correcta de tu servidor
+HOST = "172.23.43.50" # Asegurarse que sea la IP correcta del servidor
 PORT = 8000
 
 # active_games almacenará el estado de todas las partidas activas.
@@ -241,7 +241,7 @@ def handle_client_connection(conn, addr):
         setup_signal_sent_to_this_client = False 
         wait_for_global_readiness_loops = 0
         #  Es el tiempo máximo que un cliente esperará si la partida nunca se llena.
-        MAX_GLOBAL_WAIT_LOOPS = 180 # ej., 180 segundos (3 minutos)
+        MAX_GLOBAL_WAIT_LOOPS = 180 # 180 segundos (3 minutos)
 
         while not setup_signal_sent_to_this_client and wait_for_global_readiness_loops < MAX_GLOBAL_WAIT_LOOPS:
             game_is_globally_ready_now = False
@@ -681,7 +681,6 @@ def get_formatted_available_games():
                     })
     return games_output
 
-# handle_list_games_request no cambia mucho, usa la función anterior.
 def handle_list_games_request(conn_list):
     games_data = get_formatted_available_games()
     games_str_parts = []

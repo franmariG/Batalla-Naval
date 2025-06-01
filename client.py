@@ -30,7 +30,7 @@ BOARD_GRID_COLOR = (50, 50, 150)
 TEXT_COLOR = (230, 230, 230) 
 STATUS_TEXT_COLOR = WHITE 
 
-# Estados del juego (se mantienen la mayoría)
+# Estados del juego
 STATE_CONNECTING = "CONNECTING"  # Estado inicial al conectar
 STATE_WAITING_FOR_PLAYER = "WAITING_FOR_PLAYER"  # Usado mientras se llena la partida
 STATE_AWAITING_TEAM_NAME_INPUT = "AWAITING_TEAM_NAME_INPUT" # Nuevo para modo 4J Capitán
@@ -295,7 +295,7 @@ def listen_for_server_messages():
                     else: 
                          status_bar_message = "Esperando tablero del capitán de tu equipo..."
                 
-                elif command == "TEAM_BOARD": # Solo para P2/P4 en modo 4J [cite: 1018]
+                elif command == "TEAM_BOARD": # Solo para P2/P4 en modo 4J 
                     if game_mode == 4 and is_team_board_slave:
                         print(f"DEBUG CLIENT [{player_id_str}]: Procesando TEAM_BOARD: {message[:100]}...") 
                         my_board_data = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)] 
@@ -519,11 +519,7 @@ def listen_for_server_messages():
                         # El mensaje del servidor ya indica quién ganó/perdió
                         # parts[1:] es el mensaje del servidor
                         full_opponent_left_msg = " ".join(parts[1:])
-                        # No necesitamos cambiar el estado a GAME_OVER WIN/LOSE aquí,
-                        # porque el servidor enviará GAME_OVER WIN/LOSE por separado después de este mensaje.
-                        # Este mensaje es solo informativo.
                         status_bar_message = full_opponent_left_msg
-                        # El GAME_OVER que viene después se encargará del estado.
 
 
         except ConnectionResetError: 
@@ -844,7 +840,7 @@ def game_main_loop(mode, server_ip_to_join=None, game_id_to_join=None, action="C
                     # Lógica de clic para SETUP y YOUR_TURN
                     can_place_now = (current_game_state == STATE_SETUP_SHIPS and \
                                      current_ship_placement_index < len(ships_to_place_list) and \
-                                     not is_team_board_slave) # P2/P4 no colocan [
+                                     not is_team_board_slave) # P2/P4 no colocan
                     
                     if can_place_now: 
                         r_place, c_place = get_grid_cell_from_mouse(mouse_current_pos, BOARD_OFFSET_X_MY, BOARD_OFFSET_Y) 
