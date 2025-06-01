@@ -1,451 +1,815 @@
 # server.py
-
 import socket
 import threading
-import json
 import time
-import random
-import sys
 
-HOST = '0.0.0.0'  # Listen on all available interfaces
-PORT = 6789
-GRID_SIZE = 10
-SHIPS_CONFIG = [ # (Name, Size)
-    ("Carrier", 5), ("Battleship", 4), ("Cruiser", 3),
-    ("Submarine", 3), ("Destroyer", 2)
-]
+# Usar la IP del servidor de 4 jugadores como base
+HOST = "169.254.107.4" # Asegúrate que sea la IP correcta de tu servidor
+PORT = 8080
 
-# Game Room and Player Management
-game_rooms = {}  # {room_id: GameRoom_instance}
-next_room_id = 0
-next_player_id = 0 # Global player ID to ensure uniqueness across rooms
+# --- Estado del Servidor (para una única partida a la vez) ---
+game_lock = threading.RLock() # <--- CAMBIO IMPORTANTE: Usar RLock para permitir la re-adquisición
 
-class Player:
-    def __init__(self, sock, addr, player_id):
-        self.socket = sock
-        self.address = addr
-        self.player_id = player_id
-        self.board = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)] # 0=empty, 1=ship
-        self.ship_coords = {} # {ship_name: [(r,c), ...]}
-        self.ships_placed_count = 0
-        self.is_ready = False # Ready for game to start (all ships placed)
-        self.active_in_game = True # Still has ships floating
-        self.ships_sunk = 0
+# Información de la partida actual
+current_game = {
+    "game_id": 1, # ID de partida fijo ya que solo manejamos una
+    "mode": None, # 2 o 4 jugadores, se setea por el primer jugador
+    "max_players": 0,
+    "clients": {}, # player_id: {conn, addr, name, team_id (si 4p), last_board (si P1/P3 en 4p)}
+    "player_setup_complete": {}, # player_id: bool
+    "game_active": False,
+    "turn_lock": threading.RLock(), # <--- CAMBIO IMPORTANTE: Usar RLock también aquí por consistencia/seguridad
+    "current_turn_player_id": None,
+    "turn_order": [], # Para 4 jugadores
+    "current_turn_index": 0, # Para 4 jugadores
+    "player_teams": {}, # P1: TeamA, etc. (solo 4p)
+    "team_members_map": {}, # TeamA: [P1,P2] (solo 4p)
+    "team_details": { # (solo 4p)
+        "TeamA": {"name": None, "captain": "P1", "members": ["P1", "P2"]},
+        "TeamB": {"name": None, "captain": "P3", "members": ["P3", "P4"]}
+    },
+    "last_shot_details": {} # target_id: shooter_id (solo 4p)
+}
 
-class GameRoom:
-    def __init__(self, room_id, num_players_expected):
-        self.room_id = room_id
-        self.num_players_expected = num_players_expected
-        self.players = {}  # {player_id: Player_instance}
-        self.player_threads = {} # {player_id: thread_instance}
-        self.game_state = "WAITING"  # WAITING, SETUP, PLAYING, FINISHED
-        self.player_turn_order = [] # List of player_ids in order of turns
-        self.current_turn_idx = -1
-        self.lock = threading.Lock()
-
-    def add_player(self, player, thread):
-        with self.lock:
-            if len(self.players) < self.num_players_expected and self.game_state == "WAITING":
-                self.players[player.player_id] = player
-                self.player_threads[player.player_id] = thread
-                print(f"[Room {self.room_id}] Player {player.player_id} joined. {len(self.players)}/{self.num_players_expected}")
-                
-                self.broadcast_wait_update()
-
-                if len(self.players) == self.num_players_expected:
-                    self.start_game_setup()
-                return True
-            else: # Room full or game already started
-                self.send_to_player(player.player_id, {"type": "ERROR", "message": "Room is full or game in progress.", "fatal": True})
-                return False
-    
-    def remove_player(self, player_id):
-        with self.lock:
-            if player_id in self.players:
-                player = self.players.pop(player_id)
-                self.player_threads.pop(player_id, None)
-                print(f"[Room {self.room_id}] Player {player_id} disconnected/left.")
-
-                if self.game_state != "WAITING" and self.game_state != "FINISHED":
-                    # Player disconnected mid-game
-                    player.active_in_game = False # Mark as inactive
-                    self.broadcast({"type": "PLAYER_DEFEATED", "player_id": player_id, "reason": "disconnected"})
-                    
-                    # Check if this ends the game
-                    active_players_left = [p for p in self.players.values() if p.active_in_game]
-                    if len(active_players_left) <= 1:
-                        winner = active_players_left[0].player_id if active_players_left else None
-                        self.end_game(winner)
-                    elif self.player_turn_order[self.current_turn_idx] == player_id: # If it was their turn
-                        self.next_turn() # Advance turn
-                
-                elif self.game_state == "WAITING": # Player left before game start
-                    self.broadcast_wait_update() # Update remaining players
-                
-                # If room becomes empty, it could be cleaned up by main server thread (optional)
-            # else:
-                # print(f"[Room {self.room_id}] Attempted to remove non-existent player {player_id}")
+def reset_current_game_state():
+    global current_game
+    with game_lock:
+        current_game["mode"] = None
+        current_game["max_players"] = 0
+        current_game["clients"].clear()
+        current_game["player_setup_complete"].clear()
+        current_game["game_active"] = False
+        current_game["current_turn_player_id"] = None
+        current_game["turn_order"] = []
+        current_game["current_turn_index"] = 0
+        current_game["player_teams"].clear()
+        current_game["team_members_map"].clear()
+        current_game["team_details"]["TeamA"]["name"] = None
+        current_game["team_details"]["TeamB"]["name"] = None
+        current_game["last_shot_details"].clear()
+        print("INFO SERVER: Estado del juego reseteado para una nueva partida.")
 
 
-    def broadcast_wait_update(self):
-        for p_id, player_obj in self.players.items():
-            self.send_to_player(p_id, {
-                "type": "WAIT_UPDATE",
-                "your_id": p_id,
-                "current_players": len(self.players),
-                "expected_players": self.num_players_expected
-            })
+def get_player_team_id(player_id):
+    # No necesita lock si solo lee datos que se establecen bajo lock y no cambian frecuentemente
+    # o si se accede desde un contexto que ya tiene el lock.
+    # Por seguridad, podemos asumir que se llama desde un contexto con lock o que los datos son estables.
+    return current_game["player_teams"].get(player_id)
 
-    def start_game_setup(self):
-        self.game_state = "SETUP"
-        self.player_turn_order = list(self.players.keys())
-        random.shuffle(self.player_turn_order)
-        print(f"[Room {self.room_id}] Starting setup. Turn order: {self.player_turn_order}")
+def notify_players(message_bytes, target_player_ids=None, exclude_player_id=None):
+    # Esta función ahora puede ser llamada de forma segura desde un hilo que ya posee game_lock
+    with game_lock: 
+        ids_to_notify = []
+        if target_player_ids:
+            ids_to_notify = target_player_ids
+        else:
+            ids_to_notify = list(current_game["clients"].keys())
 
-        all_pids = list(self.players.keys())
-        for p_id in self.players:
-            self.send_to_player(p_id, {
-                "type": "GAME_START",
-                "your_id": p_id,
-                "all_player_ids": all_pids, # All players in the game
-                "player_turn_order": self.player_turn_order # For client info if needed
-            })
-            # Client will implicitly go to SETUP_SHIPS state from this
-    
-    def handle_place_ship(self, player_id, data):
-        with self.lock:
-            if self.game_state != "SETUP" or player_id not in self.players:
-                return
-            
-            player = self.players[player_id]
-            if player.ships_placed_count >= len(SHIPS_CONFIG):
-                self.send_to_player(player_id, {"type": "SHIP_PLACEMENT_INVALID", "player_id": player_id, "reason": "All ships already placed."})
-                return
-
-            ship_name = data['ship_name']
-            ship_size = data['size']
-            row, col = data['row'], data['col']
-            orientation = data['orientation']
-
-            # Validate placement (bounds, overlap)
-            temp_ship_coords = []
-            valid = True
-            for i in range(ship_size):
-                r, c = row, col
-                if orientation == 'H': c += i
-                else: r += i
-
-                if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
-                    valid = False; break
-                if player.board[r][c] == 1: # Overlap
-                    valid = False; break
-                temp_ship_coords.append((r, c))
-            
-            if valid:
-                for r, c in temp_ship_coords:
-                    player.board[r][c] = 1 # Mark as ship
-                player.ship_coords[ship_name] = temp_ship_coords
-                player.ships_placed_count += 1
-                self.send_to_player(player_id, {"type": "SHIP_PLACEMENT_SUCCESS", "player_id": player_id, "ship_coords": temp_ship_coords})
-                
-                # print(f"[Room {self.room_id}] Player {player_id} placed {ship_name}")
-                # Player client will send "FINISH_SETUP" when they are done with all ships.
-            else:
-                self.send_to_player(player_id, {"type": "SHIP_PLACEMENT_INVALID", "player_id": player_id, "reason": "Invalid position (bounds or overlap)."})
-
-    def handle_finish_setup(self, player_id):
-        with self.lock:
-            if player_id not in self.players or self.game_state != "SETUP": return
-            
-            player = self.players[player_id]
-            if player.ships_placed_count < len(SHIPS_CONFIG):
-                self.send_to_player(player_id, {"type": "ERROR", "message": "Not all ships placed yet."})
-                return
-
-            player.is_ready = True
-            print(f"[Room {self.room_id}] Player {player_id} finished setup.")
-
-            # Check if all players are ready
-            if all(p.is_ready for p in self.players.values()):
-                self.start_playing_phase()
-
-    def start_playing_phase(self):
-        self.game_state = "PLAYING"
-        self.current_turn_idx = 0
-        print(f"[Room {self.room_id}] All players ready. Starting game. First turn: {self.player_turn_order[self.current_turn_idx]}")
-        self.broadcast_turn_info()
-
-    def broadcast_turn_info(self):
-        if self.game_state != "PLAYING" or self.current_turn_idx == -1: return
-
-        current_player_id_turn = self.player_turn_order[self.current_turn_idx]
-        self.broadcast({"type": "UPDATE_TURN", "player_id_turn": current_player_id_turn})
-        print(f"[Room {self.room_id}] Turn: Player {current_player_id_turn}")
-
-    def handle_attack(self, attacker_id, data):
-        with self.lock:
-            if self.game_state != "PLAYING" or attacker_id != self.player_turn_order[self.current_turn_idx]:
-                self.send_to_player(attacker_id, {"type": "ERROR", "message": "Not your turn or game not active."})
-                return
-
-            target_player_id = data['target_player_id']
-            row, col = data['row'], data['col']
-
-            if target_player_id not in self.players or not self.players[target_player_id].active_in_game:
-                self.send_to_player(attacker_id, {"type": "ERROR", "message": "Invalid target player."})
-                return
-            
-            if target_player_id == attacker_id:
-                self.send_to_player(attacker_id, {"type": "ERROR", "message": "Cannot attack yourself."})
-                return
-
-            target_player = self.players[target_player_id]
-            
-            # Check if already attacked this cell (optional, client should prevent but server validates)
-            # For simplicity, we'll allow re-attacking but it's usually a wasted turn.
-            # Client board state will show hit/miss.
-
-            result_type = "MISS"
-            sunk_ship_details = None
-
-            if target_player.board[row][col] == 1: # It's a hit on a ship part
-                target_player.board[row][col] = 2 # Mark as hit (server-side, 2 could mean 'hit ship part')
-                result_type = "HIT"
-                
-                # Check if this hit sunk a ship
-                for ship_name, coords in target_player.ship_coords.items():
-                    if (row, col) in coords: # This hit is part of this ship
-                        is_sunk = True
-                        for r_ship, c_ship in coords:
-                            if target_player.board[r_ship][c_ship] == 1: # Still a floating part
-                                is_sunk = False
-                                break
-                        if is_sunk:
-                            result_type = "SUNK"
-                            target_player.ships_sunk += 1
-                            sunk_ship_details = {"name": ship_name, "coords": coords}
-                            print(f"[Room {self.room_id}] Player {attacker_id} SUNK {ship_name} of Player {target_player_id}")
-                            break 
-            
-            # elif target_player.board[row][col] == 0: # Miss on empty water
-                # target_player.board[row][col] = 3 # Mark as miss (server-side, 3 could mean 'missed water')
-            
-            # Broadcast result
-            attack_msg = {
-                "type": "ATTACK_RESULT",
-                "attacker_id": attacker_id,
-                "target_player_id": target_player_id,
-                "row": row, "col": col,
-                "result": result_type
-            }
-            if sunk_ship_details:
-                attack_msg["sunk_ship_name"] = sunk_ship_details["name"]
-                attack_msg["sunk_ship_coords"] = sunk_ship_details["coords"]
-            self.broadcast(attack_msg)
-
-            print(f"[Room {self.room_id}] Player {attacker_id} attacks Player {target_player_id} at ({row},{col}): {result_type}")
-
-            # Check if target player is defeated
-            if result_type == "SUNK" and target_player.ships_sunk == len(SHIPS_CONFIG):
-                target_player.active_in_game = False
-                self.broadcast({"type": "PLAYER_DEFEATED", "player_id": target_player_id})
-                print(f"[Room {self.room_id}] Player {target_player_id} has been defeated.")
-
-                # Check for game over
-                active_players_left = [p for p in self.players.values() if p.active_in_game]
-                if len(active_players_left) <= 1:
-                    winner = active_players_left[0].player_id if active_players_left else None # Winner or draw
-                    self.end_game(winner)
-                    return # Game ended, no next turn
-
-            # If game not over, proceed to next turn
-            self.next_turn()
-
-    def next_turn(self):
-        if self.game_state != "PLAYING": return
-
-        # Find next active player
-        num_total_players = len(self.player_turn_order)
-        for i in range(1, num_total_players + 1):
-            next_idx = (self.current_turn_idx + i) % num_total_players
-            next_player_id = self.player_turn_order[next_idx]
-            if self.players[next_player_id].active_in_game:
-                self.current_turn_idx = next_idx
-                self.broadcast_turn_info()
-                return
-        
-        # Should not happen if game over condition is checked correctly before calling next_turn
-        print(f"[Room {self.room_id}] Error: Could not find next active player for turn.")
-        self.end_game(None) # No winner, something went wrong
-
-    def end_game(self, winner_id):
-        self.game_state = "FINISHED"
-        self.broadcast({"type": "GAME_OVER", "winner_id": winner_id})
-        print(f"[Room {self.room_id}] Game Over. Winner: {winner_id if winner_id is not None else 'Draw/None'}")
-        # Optionally, close all player sockets in this room after a delay or message.
-        # For now, clients will disconnect or menu will take over. Room can be cleaned up.
-
-    def broadcast(self, message_dict, exclude_player_id=None):
-        message_json = json.dumps(message_dict) + '\n'
-        for p_id, player_obj in self.players.items():
-            if p_id != exclude_player_id:
+        for pid in ids_to_notify:
+            if pid == exclude_player_id:
+                continue
+            client_info = current_game["clients"].get(pid)
+            if client_info and client_info.get('conn'):
                 try:
-                    player_obj.socket.sendall(message_json.encode('utf-8'))
-                except socket.error as e:
-                    print(f"Error broadcasting to Player {p_id}: {e}")
-                    # self.remove_player(p_id) # Consider removing on send error
+                    client_info['conn'].sendall(message_bytes)
+                except Exception as e:
+                    print(f"Error notificando a {pid}: {e}")
 
-    def send_to_player(self, player_id, message_dict):
-        if player_id in self.players:
-            message_json = json.dumps(message_dict) + '\n'
-            try:
-                self.players[player_id].socket.sendall(message_json.encode('utf-8'))
-            except socket.error as e:
-                print(f"Error sending to Player {player_id}: {e}")
-                # self.remove_player(player_id)
 
-# --- Client Handler Thread ---
-def client_thread_function(client_socket, client_address):
-    global next_player_id, game_rooms, next_room_id
-    
-    current_player_id = -1
-    current_room = None
-    player_obj = None
+def handle_client_connection(conn, addr):
+    global current_game
+    player_id = None
+    initial_player_info_processed = False
 
     try:
-        # Initial message from client: JOIN_GAME
-        initial_data = client_socket.recv(1024).decode('utf-8').strip()
-        if not initial_data:
-            print(f"No initial data from {client_address}. Closing.")
-            client_socket.close()
-            return
-            
-        msg = json.loads(initial_data)
-        
-        if msg['type'] == 'JOIN_GAME':
-            mode = msg['mode'] # 2 or 4
-            
-            with threading.Lock(): # Protect global next_player_id and room assignment
-                current_player_id = next_player_id
-                next_player_id += 1
-                player_obj = Player(client_socket, client_address, current_player_id)
+        conn.settimeout(10.0) 
+        initial_data_bytes = conn.recv(1024)
+        conn.settimeout(None) 
 
-                # Find or create a room for this mode
-                found_room = False
-                for room in game_rooms.values():
-                    if room.num_players_expected == mode and len(room.players) < mode and room.game_state == "WAITING":
-                        current_room = room
-                        found_room = True
-                        break
-                
-                if not found_room:
-                    room_id = f"room_{next_room_id}"
-                    next_room_id += 1
-                    current_room = GameRoom(room_id, mode)
-                    game_rooms[room_id] = current_room
-                
-            if not current_room.add_player(player_obj, threading.current_thread()):
-                # Failed to add player (e.g. room became full just as we checked)
-                print(f"Failed to add Player {current_player_id} to room. Closing connection.")
-                client_socket.close()
+        if not initial_data_bytes:
+            print(f"Conexión de {addr} cerrada sin datos iniciales.")
+            conn.close()
+            return
+
+        initial_msg = initial_data_bytes.decode().strip()
+        print(f"DEBUG SERVER: Mensaje inicial de {addr}: '{initial_msg}'")
+        parts = initial_msg.split()
+        command = parts[0]
+
+        requested_mode = 0
+        player_name_temp = None
+
+        if command == "PLAYER_INITIAL_INFO":
+            if len(parts) >= 2:
+                try:
+                    requested_mode = int(parts[1])
+                    if requested_mode not in [2, 4]:
+                        raise ValueError("Modo inválido")
+                    if requested_mode == 2 and len(parts) >= 3:
+                        player_name_temp = " ".join(parts[2:])
+                    elif requested_mode == 4: 
+                        pass
+                except ValueError:
+                    print(f"ERROR SERVER: PLAYER_INITIAL_INFO malformado o modo inválido de {addr}: {initial_msg}")
+                    conn.sendall(b"MSG Error: Informacion inicial invalida.\n")
+                    conn.close()
+                    return
+            else:
+                print(f"ERROR SERVER: PLAYER_INITIAL_INFO incompleto de {addr}: {initial_msg}")
+                conn.sendall(b"MSG Error: Informacion inicial incompleta.\n")
+                conn.close()
                 return
         else:
-            print(f"Unexpected initial message from {client_address}: {msg}. Closing.")
-            client_socket.close()
+            print(f"ERROR SERVER: Mensaje inicial inesperado de {addr}: {initial_msg}")
+            conn.sendall(b"MSG Error: Protocolo inicial incorrecto.\n")
+            conn.close()
             return
 
-        # Main loop for this client
-        socket_buffer = ""
+        with game_lock:
+            if current_game["mode"] is None: # Primer jugador (P1)
+                current_game["mode"] = requested_mode
+                current_game["max_players"] = requested_mode
+                if requested_mode == 2:
+                    current_game["player_setup_complete"] = {"P1": False, "P2": False}
+                    player_id = "P1"
+                else: # requested_mode == 4
+                    current_game["player_setup_complete"] = {"P1": False, "P2": False, "P3": False, "P4": False}
+                    current_game["player_teams"] = {"P1": "TeamA", "P2": "TeamA", "P3": "TeamB", "P4": "TeamB"} 
+                    current_game["team_members_map"] = {"TeamA": ["P1", "P2"], "TeamB": ["P3", "P4"]} 
+                    current_game["turn_order"] = ["P1", "P3", "P2", "P4"] 
+                    current_game["team_details"] = { 
+                        "TeamA": {"name": None, "captain": "P1", "members": ["P1", "P2"]},
+                        "TeamB": {"name": None, "captain": "P3", "members": ["P3", "P4"]}
+                    }
+                    player_id = "P1"
+                
+                current_game["clients"][player_id] = {'conn': conn, 'addr': addr}
+                if player_name_temp and requested_mode == 2:
+                     current_game["clients"][player_id]['name'] = player_name_temp
+                elif requested_mode == 2:
+                     current_game["clients"][player_id]['name'] = f"Jugador {player_id}"
+                
+                # ----- INICIO DE LA MODIFICACIÓN -----
+                if requested_mode == 4:
+                    # Asignar 'team_id' también para P1 en modo 4 jugadores
+                    current_game["clients"][player_id]['team_id'] = get_player_team_id(player_id)
+                # ----- FIN DE LA MODIFICACIÓN -----
+                
+                # player_setup_complete[player_id] es implicitamente False por la inicialización general
+                # No es necesario current_game["player_setup_complete"][player_id] = False aquí de nuevo
+                print(f"INFO SERVER: Jugador {player_id} ({addr}) conectado. Juego configurado para {current_game['mode']} jugadores.")
+
+            elif requested_mode == current_game["mode"]: 
+                if len(current_game["clients"]) < current_game["max_players"]:
+                    for i in range(1, current_game["max_players"] + 1):
+                        pid_candidate = f"P{i}"
+                        if pid_candidate not in current_game["clients"]:
+                            player_id = pid_candidate
+                            break
+                    
+                    if player_id:
+                        current_game["clients"][player_id] = {'conn': conn, 'addr': addr}
+                        if player_name_temp and requested_mode == 2:
+                            current_game["clients"][player_id]['name'] = player_name_temp
+                        elif requested_mode == 2: 
+                            current_game["clients"][player_id]['name'] = f"Jugador {player_id}"
+                        
+                        # player_setup_complete[player_id] es implicitamente False
+                        if current_game["mode"] == 4:
+                             current_game["clients"][player_id]['team_id'] = get_player_team_id(player_id) # get_player_team_id no usa lock
+                        print(f"INFO SERVER: Jugador {player_id} ({addr}) conectado.")
+                    else: 
+                        print(f"ERROR SERVER: No se pudo asignar ID a {addr} aunque hay espacio.")
+                        conn.sendall(b"MSG Error: No se pudo asignar ID de jugador.\n")
+                        conn.close()
+                        return
+                else:
+                    print(f"WARN SERVER: Conexión de {addr} rechazada, partida llena ({len(current_game['clients'])}/{current_game['max_players']}).")
+                    conn.sendall(b"MSG Servidor actualmente lleno.\n")
+                    conn.close()
+                    return
+            else: 
+                print(f"WARN SERVER: Conexión de {addr} rechazada. Modo solicitado ({requested_mode}) no coincide con modo actual ({current_game['mode']}).")
+                conn.sendall(b"MSG Error: El modo de juego solicitado no coincide con la partida actual.\n")
+                conn.close()
+                return
+        
+        initial_player_info_processed = True
+        conn.sendall(f"PLAYER_ID {player_id}\n".encode()) 
+        time.sleep(0.1)
+
+        if current_game["mode"] == 4:
+            player_client_info = current_game["clients"][player_id] # Accedido después del lock, seguro
+            is_captain = (player_id == current_game["team_details"]["TeamA"]["captain"] or \
+                          player_id == current_game["team_details"]["TeamB"]["captain"]) 
+            if is_captain:
+                try:
+                    conn.sendall(b"REQUEST_TEAM_NAME\n") 
+                    print(f"DEBUG SERVER [{player_id}]: Enviado REQUEST_TEAM_NAME.")
+                    conn.settimeout(60.0)
+                    team_name_msg_bytes = conn.recv(1024) 
+                    conn.settimeout(None)
+                    if team_name_msg_bytes:
+                        team_name_msg = team_name_msg_bytes.decode().strip()
+                        if team_name_msg.startswith("TEAM_NAME_IS "): 
+                            team_name_payload = team_name_msg[len("TEAM_NAME_IS "):].strip() 
+                            if team_name_payload:
+                                # Usar game_lock en lugar de turn_lock para consistencia si team_details es parte del estado general del juego
+                                with game_lock: 
+                                    # Asumiendo player_client_info['team_id'] se asignó antes o es seguro de leer
+                                    # Esto debería ser current_game["clients"][player_id]['team_id']
+                                    # que fue asignado bajo game_lock anteriormente.
+                                    player_team_id_for_name = current_game["clients"][player_id].get('team_id', get_player_team_id(player_id))
+
+                                    current_game["team_details"][player_team_id_for_name]['name'] = team_name_payload 
+                                print(f"INFO SERVER [{player_id}]: Nombre para {player_team_id_for_name} establecido a '{team_name_payload}'.")
+                except socket.timeout:
+                    print(f"WARN SERVER [{player_id}]: Timeout esperando TEAM_NAME_IS.") 
+                except Exception as e:
+                    print(f"ERROR SERVER [{player_id}]: Procesando TEAM_NAME_IS: {e}") 
+                
+                with game_lock: # Asegurar acceso a team_details
+                    player_team_id_check = current_game["clients"][player_id].get('team_id', get_player_team_id(player_id))
+                    if not current_game["team_details"][player_team_id_check]['name']:
+                        default_team_name = f"Equipo_{player_team_id_check[-1]}" 
+                        current_game["team_details"][player_team_id_check]['name'] = default_team_name 
+                        print(f"INFO SERVER [{player_id}]: Usando nombre de equipo por defecto '{default_team_name}' para {player_team_id_check}.")
+
+        wait_loops = 0
+        max_wait_total = 120 
+        condition_to_wait = True
+        while condition_to_wait:
+            with game_lock: 
+                num_clients = len(current_game["clients"])
+                all_ready_for_setup = (num_clients == current_game["max_players"])
+                if current_game["mode"] == 4:
+                    all_ready_for_setup = all_ready_for_setup and \
+                                          current_game["team_details"]["TeamA"]["name"] and \
+                                          current_game["team_details"]["TeamB"]["name"]
+                condition_to_wait = not all_ready_for_setup
+            
+            if not condition_to_wait:
+                break
+
+            wait_loops += 1
+            if player_id not in current_game["clients"] or not current_game["clients"][player_id].get('conn'):
+                print(f"DEBUG SERVER [{player_id}]: Desconectado mientras esperaba a otros/nombres.")
+                return
+            
+            if wait_loops > max_wait_total:
+                print(f"ERROR SERVER [{player_id}]: Timeout general esperando jugadores/nombres. Terminando hilo de espera.")
+                if current_game["mode"] == 4:
+                    with game_lock: # Proteger acceso a team_details
+                        if not current_game["team_details"]["TeamA"]["name"]: current_game["team_details"]["TeamA"]["name"] = "Equipo Alfa" 
+                        if not current_game["team_details"]["TeamB"]["name"]: current_game["team_details"]["TeamB"]["name"] = "Equipo Bravo" 
+                break 
+            
+            # Leer estado de los nombres de equipo bajo lock para evitar race conditions en el mensaje de espera
+            msg_espera_extra_4p = ""
+            if current_game["mode"] == 4:
+                with game_lock:
+                    status_team_A = current_game['team_details']['TeamA']['name'] or "Pendiente" 
+                    status_team_B = current_game['team_details']['TeamB']['name'] or "Pendiente" 
+                msg_espera_extra_4p = f". Nombres Equipo A: {status_team_A}, Equipo B: {status_team_B}"
+            
+            msg_espera_str = f"MSG Esperando jugadores ({num_clients}/{current_game['max_players']}){msg_espera_extra_4p}"
+            
+            try:
+                if wait_loops % 5 == 0 or wait_loops == 1:
+                    conn.sendall(f"{msg_espera_str}\n".encode()) 
+            except socket.error:
+                return 
+            time.sleep(1)
+
+        # Enviar información de oponentes/equipos
+        # Acceder a current_game["clients"] y current_game["team_details"] necesita game_lock
+        with game_lock:
+            if current_game["mode"] == 2:
+                other_id = "P2" if player_id == "P1" else "P1"
+                opponent_name = "EsperandoOponente" # Default
+                # Esperar nombre del oponente es problemático aquí si el otro hilo aún no lo seteó.
+                # Es mejor que el nombre se setee cuando el jugador se conecta.
+                # Lo que está en current_game["clients"][other_id]['name'] debería ser lo correcto.
+                if other_id in current_game["clients"] and 'name' in current_game["clients"][other_id]:
+                    opponent_name = current_game["clients"][other_id]['name']
+                conn.sendall(f"OPPONENT_NAME {opponent_name}\n".encode())
+
+            elif current_game["mode"] == 4:
+                my_team_id_final = current_game["clients"][player_id]['team_id'] 
+                my_team_name_final = current_game["team_details"][my_team_id_final]['name'] 
+                opponent_team_id_final = "TeamB" if my_team_id_final == "TeamA" else "TeamA" 
+                opponent_team_name_final = current_game["team_details"][opponent_team_id_final]['name'] 
+                opponent_member_ids = current_game["team_details"][opponent_team_id_final]['members'] 
+                opponent_ids_payload = " ".join(opponent_member_ids) 
+                teams_info_final_msg = f"TEAMS_INFO_FINAL {my_team_name_final.replace(' ', '_')} {opponent_team_name_final.replace(' ', '_')} {opponent_ids_payload}\n" 
+                conn.sendall(teams_info_final_msg.encode()) 
+
+        # Enviar SETUP_YOUR_BOARD
+        send_setup_board = False
+        if current_game["mode"] == 2:
+            send_setup_board = True
+        elif current_game["mode"] == 4 and player_id in ("P1", "P3"): 
+            send_setup_board = True
+        
+        # player_setup_complete se accede aquí, idealmente bajo lock si hay riesgo de modificación concurrente.
+        # Sin embargo, en este punto, solo se lee para el player_id actual.
+        # Y len(clients) también.
+        is_player_setup_done = False
+        num_connected_clients = 0
+        with game_lock: # Asegurar lectura consistente
+            is_player_setup_done = current_game["player_setup_complete"].get(player_id, False)
+            num_connected_clients = len(current_game["clients"])
+
+        if send_setup_board and num_connected_clients == current_game["max_players"] and not is_player_setup_done:
+            conn.sendall(b"SETUP_YOUR_BOARD\n") 
+            print(f"DEBUG [{player_id}]: Enviado SETUP_YOUR_BOARD.")
+        
+        while True:
+            data_bytes = conn.recv(1024) 
+            if not data_bytes:
+                print(f"Jugador {player_id} desconectado (recv vacío).") 
+                break
+            
+            data_decoded_full_message = data_bytes.decode()
+            messages_received = data_decoded_full_message.split('\n') 
+
+            for data_single_message in messages_received:
+                data = data_single_message.strip() 
+                if not data: 
+                    continue
+                
+                # Mantener los logs de depuración anteriores aquí si se desea
+                print(f"DEBUG SERVER [{player_id}]: Datos: '{data}'")
+                parts = data.split() 
+                if not parts: continue
+                command = parts[0] 
+
+                if command == "READY_SETUP": 
+                    print(f"DEBUG SERVER [{player_id}]: Entrando en procesar READY_SETUP. game_active actual: {current_game.get('game_active')}")
+                    with game_lock: # game_lock es RLock, re-adquisición es segura
+                        print(f"DEBUG SERVER [{player_id}]: READY_SETUP - game_lock adquirido.")
+                        can_send_ready = False
+                        if current_game["mode"] == 2: can_send_ready = True
+                        elif current_game["mode"] == 4 and player_id in ("P1", "P3"): can_send_ready = True
+
+                        cond1_not_can_send = not can_send_ready
+                        cond2_pid_not_in_setup = player_id not in current_game.get("player_setup_complete", {})
+                        cond3_game_active = current_game.get("game_active", False) 
+                        
+                        print(f"DEBUG SERVER [{player_id}]: READY_SETUP validación -> not_can_send:{cond1_not_can_send}, pid_not_in_setup:{cond2_pid_not_in_setup}, game_active:{cond3_game_active}")
+
+                        if cond1_not_can_send or cond2_pid_not_in_setup or cond3_game_active: 
+                            print(f"DEBUG SERVER [{player_id}]: READY_SETUP ignorado debido a condiciones de validación.")
+                            continue
+                        
+                        print(f"DEBUG SERVER [{player_id}]: READY_SETUP - Validación pasada. Procediendo a marcar como listo.")
+                        current_game["player_setup_complete"][player_id] = True 
+                        
+                        player_name_for_msg = current_game.get("clients", {}).get(player_id, {}).get('name', player_id)
+                        print(f"DEBUG SERVER [{player_id}]: Marcado como listo. player_setup_complete ahora es: {current_game['player_setup_complete']}")
+                        
+                        if current_game["mode"] == 2:
+                            status_msg_for_other = f"MSG El jugador {player_name_for_msg} ha terminado.\n" 
+                            notify_players(status_msg_for_other.encode(), exclude_player_id=player_id) 
+                        elif current_game["mode"] == 4:
+                            my_team_id_for_msg = get_player_team_id(player_id) 
+                            my_team_name_for_msg = current_game["team_details"].get(my_team_id_for_msg, {}).get('name', f"Equipo {my_team_id_for_msg}") 
+                            notify_players(
+                                f"MSG El capitan del {my_team_name_for_msg} ({player_id}) ha terminado.\n".encode(), 
+                                exclude_player_id=player_id
+                            )
+                        try:
+                            conn.sendall(b"MSG Esperando que el oponente/otros terminen...\n") 
+                        except socket.error: 
+                            print(f"DEBUG SERVER [{player_id}]: Socket error al enviar 'MSG Esperando...' después de READY_SETUP. Terminando hilo.")
+                            break # Este break sale del for data_single_message, luego podría salir del while True
+
+                        all_set_up = False
+                        if current_game["mode"] == 2:
+                            all_set_up = current_game["player_setup_complete"].get("P1", False) and \
+                                         current_game["player_setup_complete"].get("P2", False) 
+                        elif current_game["mode"] == 4:
+                            all_set_up = current_game["player_setup_complete"].get("P1", False) and \
+                                         current_game["player_setup_complete"].get("P3", False) 
+                        
+                        print(f"DEBUG SERVER [{player_id}]: Chequeo all_set_up: {all_set_up}. game_active: {current_game['game_active']}")
+                        if all_set_up and not current_game["game_active"]: 
+                             print(f"DEBUG SERVER [{player_id}]: all_set_up es True y game_active es False. Intentando iniciar juego.")
+                             # Usar current_game["turn_lock"] que también es RLock
+                             with current_game["turn_lock"]: 
+                                if not current_game["game_active"]: # Doble chequeo, crucial
+                                    current_game["game_active"] = True 
+                                    
+                                    if current_game["mode"] == 4: 
+                                        for team_leader, teammate in [("P1", "P2"), ("P3", "P4")]: 
+                                            if team_leader in current_game["clients"] and teammate in current_game["clients"]:
+                                                leader_info = current_game["clients"][team_leader]
+                                                board_to_send = leader_info.get('last_board') 
+                                                if board_to_send:
+                                                    teammate_conn_obj = current_game["clients"][teammate].get('conn')
+                                                    if teammate_conn_obj:
+                                                        try:
+                                                            teammate_conn_obj.sendall(f"TEAM_BOARD {board_to_send}\n".encode()) 
+                                                            print(f"DEBUG SERVER: Enviado TEAM_BOARD de {team_leader} a {teammate}")
+                                                        except Exception as e_tb:
+                                                            print(f"Error enviando TEAM_BOARD a {teammate}: {e_tb}")
+
+                                    if current_game["mode"] == 2:
+                                        current_game["current_turn_player_id"] = "P1" 
+                                    elif current_game["mode"] == 4:
+                                        current_game["current_turn_index"] = 0 
+                                        current_game["current_turn_player_id"] = current_game["turn_order"][0] 
+                                        current_game["last_shot_details"].clear() 
+
+                                    start_msg = f"START_GAME {current_game['current_turn_player_id']}\n".encode() 
+                                    notify_players(start_msg) # notify_players usa game_lock, seguro con RLock
+                                    print(f"INFO SERVER: Juego iniciado. Turno para: {current_game['current_turn_player_id']}")
+                                else: 
+                                    print(f"DEBUG SERVER [{player_id}]: Juego YA ESTABA activo bajo turn_lock. No se reinicia.")
+                        # Fin del if all_set_up
+                    # Fin del with game_lock para READY_SETUP
+
+                elif command == "TEAM_BOARD_DATA": 
+                    if current_game["mode"] == 4 and player_id in ("P1", "P3"):
+                        with game_lock: # Proteger escritura en current_game
+                            board_payload = " ".join(parts[1:]) 
+                            current_game["clients"][player_id]['last_board'] = board_payload.strip() 
+                        print(f"DEBUG [{player_id}]: Recibido TEAM_BOARD_DATA. Length: {len(board_payload)}")
+                    # No necesita `continue` explícito si no hay más lógica para este comando en el bucle
+
+                elif command == "SHOT": 
+                    # Lógica de SHOT (acceso a current_game, turn_lock)
+                    # ... (código original de SHOT) ...
+                    if not current_game.get("game_active") or current_game.get("current_turn_player_id") != player_id:
+                        try: conn.sendall(b"MSG No es tu turno o juego no activo.\n"); continue
+                        except: break
+                    
+                    if current_game["mode"] == 2:
+                        try:
+                            r, c = parts[1], parts[2]
+                            target_opponent_id = "P2" if player_id == "P1" else "P1"
+                            # notify_players usa game_lock
+                            notify_players(f"SHOT {r} {c}\n".encode(), target_player_ids=[target_opponent_id])
+                            print(f"[{player_id}] disparo a ({r},{c}). Enviando al oponente.")
+                        except IndexError:
+                             print(f"ERROR [{player_id}]: SHOT malformado (2P) - {data}")
+                             continue # Continuar con el siguiente mensaje en el buffer
+                    
+                    elif current_game["mode"] == 4:
+                        try:
+                            target_opponent_id_shot = parts[1]
+                            r, c = parts[2], parts[3]
+                            
+                            with game_lock: # Para leer team_id y last_shot_details
+                                target_client_info = current_game["clients"].get(target_opponent_id_shot)
+                                if not target_client_info or get_player_team_id(target_opponent_id_shot) == get_player_team_id(player_id):
+                                    try: conn.sendall(b"MSG Oponente invalido.\n"); continue
+                                    except: break
+                                current_game["last_shot_details"][target_opponent_id_shot] = player_id
+                            
+                            notify_players(f"SHOT {r} {c}\n".encode(), target_player_ids=[target_opponent_id_shot])
+                            print(f"DEBUG [{player_id}]: {player_id} disparo a {target_opponent_id_shot} en ({r},{c})")
+                        except IndexError:
+                            print(f"ERROR [{player_id}]: SHOT malformado (4P) - {data}")
+                            continue
+                
+                elif command == "RESULT": 
+                    # Lógica de RESULT (acceso a current_game, turn_lock)
+                    # ... (código original de RESULT) ...
+                    if not current_game.get("game_active"): continue
+                    try:
+                        r_res, c_res, result_char = parts[1], parts[2], parts[3]
+                    except IndexError:
+                        print(f"ERROR [{player_id}]: RESULT malformado - {data}")
+                        continue
+
+                    if current_game["mode"] == 2:
+                        original_shooter_id = "P2" if player_id == "P1" else "P1"
+                        notify_players(f"UPDATE {r_res} {c_res} {result_char}\n".encode(), target_player_ids=[original_shooter_id])
+                        
+                        with current_game["turn_lock"]:
+                            if not current_game.get("game_active"): continue # Chequeo doble
+                            if result_char == 'H':
+                                current_game["current_turn_player_id"] = original_shooter_id
+                                notify_players(b"YOUR_TURN_AGAIN\n", target_player_ids=[original_shooter_id])
+                                notify_players(b"OPPONENT_TURN_MSG\n", target_player_ids=[player_id])
+                            else: # Miss 'M'
+                                current_game["current_turn_player_id"] = player_id
+                                notify_players(b"YOUR_TURN_AGAIN\n", target_player_ids=[player_id])
+                                notify_players(b"OPPONENT_TURN_MSG\n", target_player_ids=[original_shooter_id])
+                            print(f"INFO SERVER (2P): Turno para {current_game['current_turn_player_id']}")
+                    
+                    elif current_game["mode"] == 4:
+                        original_shooter_id = None
+                        with game_lock: # Para leer last_shot_details
+                            original_shooter_id = current_game["last_shot_details"].get(player_id)
+                        
+                        if not original_shooter_id or original_shooter_id not in current_game.get("clients", {}):
+                            continue
+                        
+                        notify_players(f"UPDATE {player_id} {r_res} {c_res} {result_char}\n".encode())
+                        print(f"DEBUG SERVER (4P): Enviado UPDATE a todos: {f'UPDATE {player_id} {r_res} {c_res} {result_char}'}")
+
+                        with current_game["turn_lock"]:
+                            if not current_game.get("game_active"): continue
+                            if result_char == 'H':
+                                current_game["current_turn_player_id"] = original_shooter_id
+                            else: # Miss
+                                current_game["current_turn_index"] = (current_game["current_turn_index"] + 1) % current_game["max_players"]
+                                current_game["current_turn_player_id"] = current_game["turn_order"][current_game["current_turn_index"]]
+                            
+                            notify_players(f"TURN {current_game['current_turn_player_id']}\n".encode())
+                            print(f"INFO SERVER (4P): Turno para {current_game['current_turn_player_id']}.")
+
+                elif command == "I_SUNK_MY_SHIP": 
+                    # ... (código original de I_SUNK_MY_SHIP, asegurar locks si es necesario para leer last_shot_details) ...
+                    if not current_game.get("game_active"): continue
+                    try:
+                        ship_name = parts[1]
+                        coords_str_payload = " ".join(parts[2:])
+
+                        if current_game["mode"] == 2:
+                            shooter_player_id = "P2" if player_id == "P1" else "P1"
+                            notify_players(f"OPPONENT_SHIP_SUNK {ship_name} {coords_str_payload}\n".encode(), target_player_ids=[shooter_player_id])
+                        
+                        elif current_game["mode"] == 4:
+                            original_shooter_id_sunk = None
+                            with game_lock: # Para leer last_shot_details
+                                original_shooter_id_sunk = current_game["last_shot_details"].get(player_id)
+                            
+                            if not original_shooter_id_sunk or original_shooter_id_sunk not in current_game.get("clients",{}):
+                                continue
+                            
+                            shooter_team_id = get_player_team_id(original_shooter_id_sunk) # No necesita lock si player_teams es estable
+                            if not shooter_team_id: continue
+
+                            members_to_notify_sunk = []
+                            with game_lock: # Para leer team_members_map
+                                members_to_notify_sunk = current_game["team_members_map"].get(shooter_team_id, [])
+                            
+                            notify_players(f"OPPONENT_SHIP_SUNK {player_id} {ship_name} {coords_str_payload}\n".encode(), target_player_ids=members_to_notify_sunk)
+                            print(f"INFO SERVER: Notificado a equipo {shooter_team_id} que hundieron {ship_name} de {player_id}.")
+
+                    except Exception as e:
+                        print(f"Error procesando I_SUNK_MY_SHIP: {e} - Data: {data}")
+                        continue
+                
+                elif command == "GAME_WON": 
+                    # ... (código original de GAME_WON, asegurar locks para current_game["game_active"] y notificaciones) ...
+                    # El current_game["turn_lock"] ya está siendo usado.
+                    # notify_players usa game_lock, lo cual es seguro con RLock.
+                    if current_game.get("game_active"):
+                        winner_proposer_id = player_id
+                        
+                        with current_game["turn_lock"]:
+                            if not current_game.get("game_active"):
+                                print(f"DEBUG SERVER [{player_id}]: GAME_WON pero juego ya inactivo en lock.")
+                                break # Salir del bucle de mensajes si el juego terminó por otra razón
+                            current_game["game_active"] = False
+                            current_game["current_turn_player_id"] = None
+
+                        if current_game["mode"] == 2:
+                            loser_id = "P2" if winner_proposer_id == "P1" else "P1"
+                            print(f"INFO (2P): Procesando GAME_WON. Ganador: {winner_proposer_id}, Perdedor: {loser_id}.")
+                            notify_players(b"GAME_OVER WIN\n", target_player_ids=[winner_proposer_id])
+                            notify_players(b"GAME_OVER LOSE\n", target_player_ids=[loser_id])
+                        
+                        elif current_game["mode"] == 4:
+                            winning_team_id = get_player_team_id(winner_proposer_id)
+                            if not winning_team_id: continue
+                            
+                            with game_lock: # Para leer team_members_map
+                                winners = current_game["team_members_map"].get(winning_team_id, [])
+                                losing_team_id = "TeamB" if winning_team_id == "TeamA" else "TeamA"
+                                losers = current_game["team_members_map"].get(losing_team_id, [])
+                            
+                            print(f"INFO (4P): Fin de juego. Ganadores: Equipo {winning_team_id}. Perdedores: Equipo {losing_team_id}.")
+                            for p_win_id in winners: notify_players(b"GAME_OVER WIN\n", target_player_ids=[p_win_id])
+                            for p_lose_id in losers: notify_players(b"GAME_OVER LOSE\n", target_player_ids=[p_lose_id])
+                        
+                        time.sleep(0.5)
+                        break # Salir del bucle de mensajes, el juego terminó para este jugador.
+                    else:
+                        print(f"WARN SERVER [{player_id}]: GAME_WON ignorado, juego no activo.")
+
+                # Aquí terminaba el `for data_single_message in messages_received:`
+                # Si un `break` ocurrió dentro del for, sale aquí.
+            # Aquí termina el `while True:` si el `break` interno lo gatilló (ej. socket error, GAME_WON)
+            # o si `if not data_bytes:` fue verdadero.
+
+    except ConnectionResetError: 
+        print(f"Jugador {player_id or addr} ha reseteado la conexion.") 
+    except socket.timeout:
+        print(f"Socket timeout para {player_id or addr}.")
+    except socket.error as e: 
+        # Solo loguear si era relevante o no era la desconexión esperada
+        if current_game.get("game_active", False) or not initial_player_info_processed:
+             if isinstance(e, ConnectionResetError) or (hasattr(e, 'winerror') and e.winerror == 10054): # Común en Windows
+                 print(f"Jugador {player_id or addr} cerró la conexión (socket error detectado).")
+             else:
+                 print(f"Error de socket con {player_id or addr}: {e}")
+    except Exception as e: 
+        print(f"Error inesperado con el jugador {player_id or addr}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print(f"Limpiando para el jugador {player_id or addr}.") 
+        was_game_active_before_leaving = False
+        # Acceder a game_active bajo lock para evitar race condition
+        with game_lock:
+            was_game_active_before_leaving = current_game.get("game_active", False)
+        
+        if conn and conn.fileno() != -1: 
+            try: conn.shutdown(socket.SHUT_RDWR) 
+            except: pass
+            try: conn.close() 
+            except: pass
+
+        player_left_id_final = player_id 
+        
+        with game_lock: 
+            if player_id and player_id in current_game["clients"]:
+                del current_game["clients"][player_id] 
+                print(f"Jugador {player_id} eliminado de 'clients'. Clientes restantes: {list(current_game['clients'].keys())}") 
+
+            # Si el jugador se fue DURANTE un juego activo, notificar al/los otro(s) y terminar el juego.
+            if was_game_active_before_leaving and player_left_id_final: 
+                game_truly_ended_by_this_dc = False
+                # Usar turn_lock para modificar el estado del juego activo
+                with current_game["turn_lock"]:
+                    if current_game["game_active"]: 
+                        current_game["game_active"] = False 
+                        current_game["current_turn_player_id"] = None 
+                        game_truly_ended_by_this_dc = True
+                
+                if game_truly_ended_by_this_dc:
+                    print(f"INFO SERVER: Jugador {player_left_id_final} se fue durante partida activa.") 
+                    if current_game["mode"] == 2:
+                        other_player_id_on_dc = "P1" if player_left_id_final == "P2" else "P2"
+                        # Clientes restantes se leen bajo game_lock (hecho por notify_players)
+                        if other_player_id_on_dc in current_game["clients"]: # Chequear si el otro aún está
+                            notify_players(b"OPPONENT_LEFT\n", target_player_ids=[other_player_id_on_dc]) 
+                            notify_players(b"GAME_OVER WIN\n", target_player_ids=[other_player_id_on_dc])
+                    
+                    elif current_game["mode"] == 4:
+                        losing_team_id_on_dc = get_player_team_id(player_left_id_final) 
+                        winning_team_id_on_dc = "TeamB" if losing_team_id_on_dc == "TeamA" else "TeamA" 
+                        print(f"INFO SERVER: Equipo {losing_team_id_on_dc} pierde por desconexion de {player_left_id_final}. Gana Equipo {winning_team_id_on_dc}.") 
+                        
+                        msg_dc_broadcast = f"OPPONENT_TEAM_LEFT El jugador {player_left_id_final} del equipo {losing_team_id_on_dc} se ha desconectado. Su equipo pierde.\n".encode() 
+                        
+                        # Leer mapas de equipo bajo game_lock
+                        winners_on_dc = current_game["team_members_map"].get(winning_team_id_on_dc, []) 
+                        losers_team_members_on_dc = current_game["team_members_map"].get(losing_team_id_on_dc, [])
+                        
+                        # Filtrar los perdedores que todavía están conectados
+                        # current_game["clients"] se accede dentro de notify_players (que tiene game_lock)
+                        # O podemos construir la lista de IDs aquí bajo el lock actual.
+                        
+                        # Notificar a los ganadores
+                        for p_id_notify_win in winners_on_dc:
+                             if p_id_notify_win in current_game["clients"]: # Asegurarse que el ganador sigue conectado
+                                notify_players(msg_dc_broadcast, target_player_ids=[p_id_notify_win])
+                                notify_players(b"GAME_OVER WIN\n", target_player_ids=[p_id_notify_win])
+                        
+                        # Notificar a los miembros restantes del equipo perdedor
+                        for p_id_notify_lose in losers_team_members_on_dc:
+                            if p_id_notify_lose != player_left_id_final and p_id_notify_lose in current_game["clients"]:
+                                notify_players(msg_dc_broadcast, target_player_ids=[p_id_notify_lose])
+                                notify_players(b"GAME_OVER LOSE\n", target_player_ids=[p_id_notify_lose])
+                                
+            if not current_game["clients"]: 
+                print("Todos los jugadores se han desconectado. Reseteando estado del servidor.") 
+                reset_current_game_state() 
+        
+        print(f"Fin de handle_client_connection para {player_id or addr}.") 
+
+def get_formatted_available_games():
+    global current_game
+    games_output = []
+    with game_lock: 
+        if current_game["mode"] is None: 
+            pass
+        elif len(current_game["clients"]) < current_game["max_players"]:
+            game_name = f"Partida de {current_game['mode']}J" # Simplificado
+            if "P1" in current_game["clients"] and 'name' in current_game["clients"]["P1"]:
+                 if current_game["mode"] == 2:
+                     game_name = f"{current_game['clients']['P1']['name']} esperando..."
+                 elif current_game["mode"] == 4:
+                     team_a_name_temp = current_game["team_details"]["TeamA"]["name"]
+                     if team_a_name_temp:
+                         game_name = f"Equipo: {team_a_name_temp}"
+                     else:
+                         game_name = f"Cap. {current_game['clients']['P1']['name']} creando..."
+            elif current_game["mode"] == 4: # Si P1 no está, pero es modo 4J
+                game_name = "Esperando Cap. TeamA"
+
+            games_output.append({ 
+                "nombre_creador": game_name,
+                "id": current_game["game_id"], 
+                "jugadores_conectados": len(current_game["clients"]), 
+                "max_jugadores": current_game["max_players"] 
+            })
+    return games_output
+
+
+def handle_list_games_request(conn_list): 
+    games_data = get_formatted_available_games() 
+    games_str_parts = []
+    for g in games_data:
+        games_str_parts.append(f"{g['nombre_creador']}|{g['id']}|{g['jugadores_conectados']}|{g['max_jugadores']}") 
+    games_str = ";".join(games_str_parts)
+    try:
+        conn_list.sendall(f"GAMES_LIST {games_str}\n".encode()) 
+    except Exception as e:
+        print(f"Error enviando GAMES_LIST: {e}") 
+    finally:
+        try: conn_list.shutdown(socket.SHUT_RDWR) 
+        except: pass
+        conn_list.close() 
+
+def start_server():
+    global current_game
+    reset_current_game_state() 
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) 
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+    try:
+        server_socket.bind((HOST, PORT)) 
+    except OSError as e:
+        print(f"Error al enlazar el socket en {HOST}:{PORT} - {e}") 
+        return
+        
+    server_socket.listen(5) 
+    print(f"Servidor Unificado de Batalla Naval escuchando en {HOST}:{PORT}") 
+    
+    active_threads = []
+    try:
         while True:
             try:
-                data = client_socket.recv(2048)
-                if not data: # Connection closed by client
-                    break 
-                
-                socket_buffer += data.decode('utf-8')
-                
-                while '\n' in socket_buffer:
-                    message_json, socket_buffer = socket_buffer.split('\n', 1)
-                    if message_json:
-                        client_msg = json.loads(message_json)
-                        # print(f"SERVER RECV from P{current_player_id}: {client_msg}") # Debug
-
-                        if client_msg["type"] == "PLACE_SHIP":
-                            current_room.handle_place_ship(current_player_id, client_msg)
-                        elif client_msg["type"] == "FINISH_SETUP":
-                            current_room.handle_finish_setup(current_player_id)
-                        elif client_msg["type"] == "ATTACK":
-                            current_room.handle_attack(current_player_id, client_msg)
-                        elif client_msg["type"] == "LEAVE_GAME":
-                            print(f"Player {current_player_id} explicitly sent LEAVE_GAME.")
-                            raise ConnectionResetError # Treat as disconnect
-                        # Add other message types as needed
-
-            except BlockingIOError: # Should not happen with blocking sockets in thread
-                time.sleep(0.01) # Just in case, though unlikely
-                continue
-            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-                print(f"Player {current_player_id} ({client_address}) disconnected.")
+                conn, addr = server_socket.accept() 
+            except OSError: 
+                print("Socket del servidor cerrado. Terminando bucle de aceptación.") 
                 break
-            except json.JSONDecodeError:
-                print(f"Invalid JSON from Player {current_player_id}: '{message_json[:100]}...'") # Print first 100 chars
-                socket_buffer = "" # Clear buffer to prevent re-parsing bad data
             except Exception as e:
-                print(f"Error processing message from Player {current_player_id}: {e}")
-                import traceback
-                traceback.print_exc()
-                break # Critical error with this client's messages
+                print(f"Error aceptando conexión: {e}") 
+                continue
 
-    finally:
-        if current_room and current_player_id != -1:
-            current_room.remove_player(current_player_id)
-        
-        # Clean up empty finished rooms (optional, could be a periodic task)
-        if current_room and not current_room.players and current_room.game_state == "FINISHED":
-            with threading.Lock(): # Protect game_rooms dictionary
-                if current_room.room_id in game_rooms and not game_rooms[current_room.room_id].players:
-                    print(f"Cleaning up empty finished room: {current_room.room_id}")
-                    del game_rooms[current_room.room_id]
-        
-        client_socket.close()
-        print(f"Closed connection for Player {current_player_id} from {client_address}")
-
-
-# --- Main Server Execution ---
-if __name__ == "__main__":
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Allow reusing address quickly
-    try:
-        server_socket.bind((HOST, PORT))
-    except socket.error as e:
-        print(f"Error binding server socket: {e}")
-        sys.exit(1)
-    
-    server_socket.listen(5) # Max queued connections
-    print(f"Server listening on {HOST}:{PORT}")
-
-    try:
-        while True:
-            client_sock, client_addr = server_socket.accept()
-            # client_sock.setblocking(True) # Sockets are blocking by default
-            print(f"Accepted connection from {client_addr}")
+            initial_peek_bytes = None
+            is_list_request = False
+            try:
+                conn.settimeout(0.2)  
+                initial_peek_bytes = conn.recv(1024, socket.MSG_PEEK) 
+                conn.settimeout(None) 
+                if initial_peek_bytes:
+                    decoded_peek = initial_peek_bytes.decode().strip()
+                    if decoded_peek.startswith("LIST_GAMES"): 
+                        is_list_request = True
+                        conn.recv(len(initial_peek_bytes)) 
+                        print(f"DEBUG SERVER: Recibida petición LIST_GAMES de {addr}.") 
+                        # No crear hilo para LIST_GAMES, manejar directamente
+                        handle_list_games_request(conn) 
+                        continue 
+            except socket.timeout: 
+                conn.settimeout(None)
+            except Exception as e: 
+                print(f"Error en peek de conexión de {addr}: {e}") 
+                conn.close()
+                continue
             
-            thread = threading.Thread(target=client_thread_function, args=(client_sock, client_addr))
-            thread.daemon = True # Allow main program to exit even if threads are running
+            print(f"INFO SERVER: Nueva conexión de juego de {addr}")
+            thread = threading.Thread(target=handle_client_connection, args=(conn, addr), daemon=True) 
             thread.start()
-            # Note: We don't store the main thread objects here unless we need to join() them,
-            # but player_threads in GameRoom stores them for specific players.
-    except KeyboardInterrupt:
-        print("Server shutting down...")
-    finally:
-        for room_id, room in list(game_rooms.items()): # Iterate over a copy for safe deletion
-            room.broadcast({"type": "SERVER_SHUTDOWN", "message": "Server is shutting down."})
-            # Give a moment for messages to go out
-            time.sleep(0.2)
-            for p_id, player in list(room.players.items()): # Iterate over a copy
-                player.socket.close()
-            # Optionally clear rooms more explicitly if needed
-            if room_id in game_rooms: del game_rooms[room_id]
+            active_threads.append(thread)
+            
+            # Limpiar hilos terminados (opcional, pero buena práctica)
+            active_threads = [t for t in active_threads if t.is_alive()]
 
-        server_socket.close()
-        print("Server socket closed.")
+    except KeyboardInterrupt:
+        print("\nDeteniendo el servidor (Ctrl+C)...")
+    finally:
+        if server_socket:
+            server_socket.close()
+        print("Esperando que los hilos de cliente terminen...")
+        for t in active_threads:
+            if t.is_alive():
+                t.join(timeout=1.0) # Dar un poco de tiempo para que los hilos terminen
+        print("Servidor principal finalizando.")
+
+
+# if __name__ == "__main__":
+#     # No es necesario un hilo separado para start_server si la lógica de finalización está en start_server
+#     start_server()
+
+
+if __name__ == "__main__":
+    server_thread = threading.Thread(target=start_server, daemon=True) # [cite: 718, 990]
+    server_thread.start() # [cite: 718, 990]
+    print("Presiona Ctrl+C para detener el servidor.") # [cite: 718, 990]
+    try:
+        while server_thread.is_alive(): # [cite: 718, 990]
+            time.sleep(1)
+    except KeyboardInterrupt: # [cite: 719, 990]
+        print("\nDeteniendo el servidor (Ctrl+C)...") # [cite: 719, 990]
+    finally:
+        print("Servidor principal finalizando.") # [cite: 719, 990]
