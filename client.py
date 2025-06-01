@@ -6,6 +6,8 @@ import sys
 import time
 import os # Para construir rutas a los archivos de sonido
 
+from server import team_details
+
 # --- Configuración de Conexión ---
 SERVER_IP = "169.254.107.4"
 PORT = 8080
@@ -94,9 +96,72 @@ miss_sound = None
 sunk_sound = None # NUEVO
 
 # --- Comunicación con el Servidor ---
-player_name = ""  # Nuevo: nombre del jugador
-opponent_name = ""  # Nuevo: nombre del oponente
+# player_name = "" # Ya no se usa para nombre individual al inicio
+# opponent_name = "" # Se reemplazará por nombres de equipo
+g_my_team_name = None
+g_opponent_team_name = None
+g_player_id_for_team_name_prompt = None # Para saber si este cliente debe pedir nombre de equipo
 
+# NUEVA función para pedir nombre de equipo (similar a prompt_for_player_name)
+def prompt_for_team_name_gui():
+    global screen, font_large, font_medium, font_small # Asegúrate que estén inicializadas si no lo están globalmente antes
+    
+    # Si las fuentes no están inicializadas porque game_main_loop aún no lo hizo:
+    if font_large is None: pygame.font.init() # Necesario si pygame no está completamente init
+    if font_large is None: font_large = pygame.font.Font(None, 48)
+    if font_medium is None: font_medium = pygame.font.Font(None, 36)
+    if font_small is None: font_small = pygame.font.Font(None, 28)
+    if screen is None: # Si el screen no está seteado (debería estarlo por game_main_loop)
+        screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+
+
+    pygame.display.set_caption("Batalla Naval - Nombra tu Equipo")
+    input_box = pygame.Rect(SCREEN_WIDTH // 2 - 200, SCREEN_HEIGHT // 2, 400, 48)
+    color_inactive = pygame.Color('lightskyblue3')
+    color_active = pygame.Color('dodgerblue2')
+    color = color_inactive
+    active = False
+    text = ""
+    done = False
+    prompt_message = f"Capitán {g_player_id_for_team_name_prompt}, ingresa el nombre de tu equipo:"
+
+    while not done:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if input_box.collidepoint(event.pos):
+                    active = not active
+                else:
+                    active = False
+                color = color_active if active else color_inactive
+            if event.type == pygame.KEYDOWN:
+                if active:
+                    if event.key == pygame.K_RETURN:
+                        if text.strip(): # Aceptar si no está vacío después de strip
+                            done = True
+                    elif event.key == pygame.K_BACKSPACE:
+                        text = text[:-1]
+                    elif len(text) < 25 and event.unicode.isprintable(): # Limitar longitud
+                        text += event.unicode
+
+        screen.fill(BLACK) # Fondo negro
+        draw_text_on_screen(screen, prompt_message, (SCREEN_WIDTH // 2 - input_box.w // 2 - 10 , SCREEN_HEIGHT // 2 - 60), font_medium, WHITE)
+        
+        # Renderizar texto del input
+        txt_surface = font_large.render(text, True, color)
+        # Ajustar ancho del input_box dinámicamente o mantenerlo fijo
+        # input_box.w = max(400, txt_surface.get_width()+20) # Dinámico
+        screen.blit(txt_surface, (input_box.x+10, input_box.y+5))
+        pygame.draw.rect(screen, color, input_box, 2, border_radius=5)
+        
+        draw_text_on_screen(screen, "Presiona Enter para continuar", (input_box.x, SCREEN_HEIGHT // 2 + 60), font_small, WHITE)
+        pygame.display.flip()
+        
+    return text.strip()
+
+# ya no se usa para cuatro jugadores
 def prompt_for_player_name():
     """Muestra una pantalla para que el usuario escriba su nombre antes de conectarse."""
     global screen, font_large, font_medium, font_small
@@ -147,18 +212,13 @@ def prompt_for_player_name():
     return text.strip()
 
 def connect_to_server_thread():
-    global client_socket, current_game_state, status_bar_message, player_id_str, player_name
+    global client_socket, current_game_state, status_bar_message, player_id_str
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         print(f"Intentando conectar a {SERVER_IP}:{PORT}...")
         client_socket.connect((SERVER_IP, PORT))
-        # Enviar el nombre del jugador al servidor
-        if player_name:
-            try:
-                client_socket.sendall(f"PLAYER_NAME {player_name}".encode())
-            except Exception as e:
-                print(f"Error enviando nombre de jugador: {e}")
-        status_bar_message = "Conectado. Esperando asignacion..."
+        # Ya NO enviamos PLAYER_NAME aquí. El servidor solicitará el nombre del equipo si es necesario.
+        status_bar_message = "Conectado. Esperando ID del servidor..."
         threading.Thread(target=listen_for_server_messages, daemon=True).start()
     except ConnectionRefusedError:
         status_bar_message = "Error: Conexion rechazada por el servidor."
@@ -169,18 +229,18 @@ def connect_to_server_thread():
 
 def listen_for_server_messages():
     global current_game_state, status_bar_message, player_id_str, my_board_data, opponent_board_data, client_socket
-    global opponent_sunk_ships_log, opponent_name, my_placed_ships_detailed, ships_to_place_list, current_ship_placement_index, is_team_board_slave
-    
-    # Búfer para almacenar datos incompletos del servidor
+    global opponent_sunk_ships_log, g_my_team_name, g_opponent_team_name, g_player_id_for_team_name_prompt
+    global opponents_info, is_team_board_slave # is_team_board_slave ya existía
+
     data_buffer = ""
-    # Bucle mientras el juego no haya terminado Y el socket exista
     while current_game_state != STATE_GAME_OVER and client_socket: 
         try:
-            data_bytes = client_socket.recv(1024)
+            data_bytes = client_socket.recv(2048) # Aumentar un poco por si llegan varios mensajes
             if not data_bytes:
+                # ... (manejo de desconexión como lo tienes) ...
                 if current_game_state != STATE_GAME_OVER : 
                     status_bar_message = "Desconectado del servidor (recv vacío)."
-                    current_game_state = STATE_GAME_OVER
+                current_game_state = STATE_GAME_OVER
                 break 
             
             # Añadir los nuevos datos al búfer
@@ -191,7 +251,7 @@ def listen_for_server_messages():
                 message = message.strip() # Limpiar espacios en blanco
                 if not message:
                     continue
-
+                print(f"DEBUG CLIENT [{player_id_str or 'N/A'}]: Servidor dice: {message}") # Enhanced Debug
                 print(f"Servidor dice: {message}")
                 parts = message.split()
                 if not parts:
@@ -200,74 +260,166 @@ def listen_for_server_messages():
 
                 # --- BLOQUE PARA TEAM_BOARD (debe ir antes de otros elif) ---
                 if command == "TEAM_BOARD":
+                    print(f"DEBUG CLIENT [{player_id_str or 'N/A'}]: Procesando TEAM_BOARD: {message}") # DEBUG
                     my_board_data = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
                     my_placed_ships_detailed.clear()
-                    barcos = message[len("TEAM_BOARD "):].split(";")
-                    for barco in barcos:
-                        if not barco.strip():
+                    
+                    board_content_str = message[len("TEAM_BOARD "):].strip()
+                    if not board_content_str:
+                        print(f"WARN CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD recibido con payload vacío.")
+                        is_team_board_slave = True # Still set this as the role is assigned
+                        current_game_state = STATE_WAITING_OPPONENT_SETUP
+                        status_bar_message = "Esperando al oponente (tablero de equipo vacío recibido)..."
+                        continue
+                    
+                    barcos_str_list = board_content_str.split(";")
+                    
+                    for idx, barco_definition_str in enumerate(barcos_str_list):
+                        barco_definition_str = barco_definition_str.strip()
+                        if not barco_definition_str:
+                            print(f"WARN CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: cadena de barco vacía en índice {idx}.")
                             continue
                         try:
-                            coords_part, name, orient = barco.split("|")
-                            coords = [int(x) for x in coords_part.strip().split()]
-                            ship_coords = []
-                            for i in range(0, len(coords), 2):
-                                r, c = coords[i], coords[i+1]
-                                my_board_data[r][c] = 1
-                                ship_coords.append((r, c))
-                            if ship_coords:
-                                min_r, min_c = ship_coords[0]
-                                img_top_left_x = BOARD_OFFSET_X_MY + min_c * CELL_SIZE
-                                img_top_left_y = BOARD_OFFSET_Y + min_r * CELL_SIZE
-                                ship_img_data = ship_images.get(name)
-                                width, height = (len(ship_coords) * CELL_SIZE, CELL_SIZE) if orient == 'H' else (CELL_SIZE, len(ship_coords) * CELL_SIZE)
-                                if ship_img_data:
-                                    actual_image = ship_img_data.get(orient)
-                                    if actual_image:
-                                        width = actual_image.get_width()
-                                        height = actual_image.get_height()
-                                ship_screen_rect = pygame.Rect(img_top_left_x, img_top_left_y, width, height)
-                                my_placed_ships_detailed.append({
-                                    "name": name,
-                                    "base_image_key": name,
-                                    "size": len(ship_coords),
-                                    "coords": ship_coords,
-                                    "orientation": orient,
-                                    "is_sunk": False,
-                                    "image_rect_on_board": ship_screen_rect
-                                })
+                            coords_part, name, orient = barco_definition_str.split("|") # [cite: 170]
+                            coords_part = coords_part.strip()
+                            name = name.strip()
+                            orient = orient.strip()
+
+                            if not coords_part or not name or not orient:
+                                print(f"ERROR CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: Partes inválidas en '{barco_definition_str}'")
+                                continue
+                                
+                            coords_str_list = coords_part.split()
+                            parsed_coords_int = [int(x) for x in coords_str_list] # [cite: 170]
+                            
+                            current_ship_coords_tuples = [] # Para este barco específico
+                            if len(parsed_coords_int) % 2 != 0:
+                                print(f"ERROR CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: Número impar de componentes de coordenadas para '{name}': {coords_part}")
+                                continue # Saltar este barco
+
+                            for i in range(0, len(parsed_coords_int), 2): # [cite: 171]
+                                r, c = parsed_coords_int[i], parsed_coords_int[i+1]
+                                if not (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE):
+                                    print(f"ERROR CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: Coordenadas ({r},{c}) fuera de rango para '{name}'. Saltando este barco.")
+                                    current_ship_coords_tuples.clear() # Invalida este barco
+                                    break 
+                                my_board_data[r][c] = 1 # *** CRITICAL: Mark cell in grid data ***
+                                current_ship_coords_tuples.append((r, c)) # [cite: 172]
+                            
+                            if not current_ship_coords_tuples: # Si el bucle anterior falló o no se añadieron coordenadas
+                                print(f"WARN CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: No se procesaron coordenadas válidas para el barco '{name}' con def: '{barco_definition_str}'")
+                                continue
+
+                            # Determinar la esquina superior izquierda para la imagen del barco
+                            # Usa la primera coordenada como referencia para la posición de la imagen
+                            # Esto asume que las coordenadas están ordenadas o que la primera es la ancla.
+                            ref_r, ref_c = current_ship_coords_tuples[0] 
+                            
+                            img_top_left_x = BOARD_OFFSET_X_MY + ref_c * CELL_SIZE # [cite: 173]
+                            img_top_left_y = BOARD_OFFSET_Y + ref_r * CELL_SIZE # [cite: 173]
+                            
+                            ship_img_data = ship_images.get(name) # [cite: 174]
+                            # Default width/height, can be overridden by actual image dimensions
+                            width = len(current_ship_coords_tuples) * CELL_SIZE if orient == 'H' else CELL_SIZE 
+                            height = CELL_SIZE if orient == 'H' else len(current_ship_coords_tuples) * CELL_SIZE
+                                
+                            if ship_img_data:
+                                actual_image = ship_img_data.get(orient)
+                                if actual_image:
+                                    width = actual_image.get_width()
+                                    height = actual_image.get_height()
+                            ship_screen_rect = pygame.Rect(img_top_left_x, img_top_left_y, width, height)
+                            my_placed_ships_detailed.append({ # [cite: 177]
+                                "name": name,
+                                "base_image_key": name, # [cite: 177]
+                                "size": len(current_ship_coords_tuples), # [cite: 178]
+                                "coords": list(current_ship_coords_tuples), # Asegurar que es una nueva lista
+                                "orientation": orient, # [cite: 178]
+                                "is_sunk": False, # [cite: 179]
+                                "image_rect_on_board": ship_screen_rect # [cite: 179]
+                            })
+                            print(f"DEBUG CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: Añadido barco '{name}' con {len(current_ship_coords_tuples)} segmentos.")
+                        except ValueError as e:
+                            print(f"ERROR CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: ValueError al parsear coordenadas en '{barco_definition_str}': {e}")
+                            continue # Procesar el siguiente barco
+                        except IndexError as e:
+                            print(f"ERROR CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: IndexError al parsear partes del barco en '{barco_definition_str}': {e}")
+                            continue # Procesar el siguiente barco
                         except Exception as e:
-                            print(f"Error procesando TEAM_BOARD: {e}")
-                    is_team_board_slave = True
-                    current_game_state = STATE_WAITING_OPPONENT_SETUP
-                    status_bar_message = "Esperando a que el oponente termine la configuración..."
-                    continue
-                if command == "TEAM_INFO":
-                    try:
-                        # Limpiamos la lista de oponentes por si acaso
-                        opponents_info.clear()
-                        # Los oponentes vienen en pares (id, nombre) a partir del índice 3
-                        for i in range(3, len(parts), 2):
-                            if i + 1 < len(parts):
-                                opp_id = parts[i]
-                                opp_name = parts[i+1]
-                                opponents_info.append({'id': opp_id, 'name': opp_name})
+                            print(f"ERROR CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD: Excepción inesperada procesando barco '{barco_definition_str}': {e}")
+                            import traceback
+                            traceback.print_exc() # Imprime el traceback completo
+                            continue # Procesar el siguiente barco
+                    print(f"DEBUG CLIENT [{player_id_str or 'N/A'}]: TEAM_BOARD procesado. {len(my_placed_ships_detailed)} barcos cargados en my_placed_ships_detailed.")
+                    print(f"DEBUG CLIENT [{player_id_str or 'N/A'}]: my_board_data (primeras 3 filas):")
+                    for i in range(min(3, GRID_SIZE)):
+                         print(f"  {my_board_data[i]}")
 
-                        # Extraer el nombre del primer oponente para mostrarlo
-                        if opponents_info:
-                            opponent_name = opponents_info[0]['name'] # Muestra el nombre de uno de los oponentes
-
-                        print(f"Oponentes identificados: {[o['name'] for o in opponents_info]}")
-
-                    except IndexError:
-                        print("Error procesando TEAM_INFO.")
-                    continue
+                    is_team_board_slave = True # [cite: 180]
+                    current_game_state = STATE_WAITING_OPPONENT_SETUP # [cite: 181]
+                    status_bar_message = "Tablero de equipo recibido. Esperando al oponente..."
+                    continue # Importante para no procesar como otro comando si hay data_buffer remanente
                 
                 if command == "MSG":
                     status_bar_message = ' '.join(parts[1:])
                 elif command == "PLAYER_ID":
                     player_id_str = parts[1]
-                elif command == "OPPONENT_NAME":
-                    opponent_name = ' '.join(parts[1:])
+                    g_player_id_for_team_name_prompt = player_id_str # Guardar para el prompt de nombre de equipo
+                    status_bar_message = f"ID asignado: {player_id_str}. Esperando inicio..."
+                elif command == "REQUEST_TEAM_NAME":
+                    # El servidor pide a este cliente (P1 o P3) que ingrese el nombre del equipo
+                    status_bar_message = "El servidor solicita el nombre de tu equipo."
+                    # Es importante que el prompt se muestre en el hilo principal de Pygame.
+                    # Esta función de escucha está en un hilo secundario.
+                    # Una forma es poner una bandera y que el bucle principal de Pygame lo maneje.
+                    # Por ahora, llamaremos a una función que bloquea este hilo hasta que se ingrese el nombre.
+                    # (Esto no es ideal para GUI muy responsivas, pero simplifica)
+                    
+                    # Esta llamada a prompt_for_team_name_gui() ahora se hace condicionalmente 
+                    # en el bucle principal de Pygame cuando una bandera se activa.
+                    # Aquí solo activamos la bandera o ponemos un estado.
+                    # Para simplificar aquí, vamos a asumir que podemos llamar a una función que pide el nombre
+                    # y bloquea este hilo hasta que se obtenga. Para una GUI real, se usarían colas/eventos.
+                    
+                    # Solución más simple para ahora (bloqueante, pero evita rediseño mayor inmediato):
+                    # OJO: Esto bloqueará este hilo de escucha. Si Pygame se congela, hay que cambiarlo.
+                    # Una mejor manera es poner current_game_state = "PROMPTING_TEAM_NAME" y que el
+                    # bucle principal de Pygame maneje el input y luego envíe el mensaje.
+                    # Por ahora, probemos así para ver si el flujo funciona:
+                    if player_id_str == team_details["TeamA"]["captain"] or player_id_str == team_details["TeamB"]["captain"]: # Doble chequeo
+                        print(f"DEBUG CLIENT [{player_id_str}]: Recibido REQUEST_TEAM_NAME. Abriendo prompt...")
+                        # Aquí, en un juego real, activarías un estado para que el bucle principal de Pygame muestre el input.
+                        # Por ahora, vamos a simular que el prompt se maneja y se obtiene el nombre.
+                        # NO LLAMAR A prompt_for_team_name_gui() directamente desde este hilo si causa problemas de Pygame.
+                        # En su lugar:
+                        current_game_state = "AWAITING_TEAM_NAME_INPUT" # Nuevo estado
+                        status_bar_message = "Ingresa el nombre de tu equipo y presiona Enter."
+                        # El bucle principal de Pygame detectará "AWAITING_TEAM_NAME_INPUT", llamará a
+                        # prompt_for_team_name_gui(), y luego enviará el mensaje.
+                    else:
+                        print(f"DEBUG CLIENT [{player_id_str}]: Recibido REQUEST_TEAM_NAME pero no soy capitán. Ignorando.")
+                elif command == "TEAMS_INFO_FINAL":
+                    try:
+                        g_my_team_name = parts[1].replace("_", " ") # Reemplazar underscores si el servidor los usa para espacios
+                        g_opponent_team_name = parts[2].replace("_", " ")
+                        
+                        opponents_info.clear() # Limpiar la lista de oponentes anterior
+                        if len(parts) > 3: # Si se enviaron los IDs de los oponentes
+                            # parts[3:] serán los IDs individuales de los oponentes. Ej: "P3", "P4"
+                            opponent_ids_received = parts[3:] 
+                            for opp_id in opponent_ids_received:
+                                # Guardamos el ID. El 'name' podría ser el nombre del equipo oponente para referencia,
+                                # o un placeholder si no se necesita para mostrar nombres individuales.
+                                opponents_info.append({"id": opp_id, "name": g_opponent_team_name}) 
+                        
+                        status_bar_message = f"Tu equipo: {g_my_team_name}. Oponente: {g_opponent_team_name}. Esperando configuración..."
+                        print(f"INFO CLIENT: Nombres de equipo recibidos. Mío: '{g_my_team_name}', Oponente: '{g_opponent_team_name}'. opponents_info: {opponents_info}")
+                        
+                        # Si el juego estaba en un estado de espera de nombres, puede avanzar
+                        if current_game_state == "WAITING_FOR_TEAM_NAMES" or current_game_state == STATE_WAITING_FOR_PLAYER : # Si estaba esperando esto
+                           pass # La lógica de SETUP_YOUR_BOARD o START_GAME lo moverá al siguiente estado
+                    except IndexError:
+                        print(f"Error parseando TEAMS_INFO_FINAL: {message}")
                 elif command == "SETUP_YOUR_BOARD":
                     current_game_state = STATE_SETUP_SHIPS
                     status_bar_message = f"{player_id_str}: Coloca tus barcos. 'R' para rotar. Click para colocar."
@@ -345,8 +497,9 @@ def listen_for_server_messages():
                             continue
 
                         id_jugador_afectado = parts[1] # ID del jugador cuyo barco se hundió
-                        ship_name = parts[2]           # Nombre del barco hundido
+                        ship_name_sunk = parts[2]           # Nombre del barco hundido
                         
+                        status_bar_message = f"¡Hundiste el {ship_name_sunk} del equipo {g_opponent_team_name} (jugador {id_jugador_afectado})!"
                         # Las coordenadas comienzan desde parts[3]
                         flat_coords_str = parts[3:]
                         
@@ -368,22 +521,22 @@ def listen_for_server_messages():
                                 break
                         
                         if not sunk_ship_coords_tuples: # Si hubo error en las coordenadas o no hay
-                             print(f"Advertencia: No se procesaron coordenadas para OPPONENT_SHIP_SUNK {ship_name}.")
+                             print(f"Advertencia: No se procesaron coordenadas para OPPONENT_SHIP_SUNK {ship_name_sunk}.")
                              continue
                          
                         # El resto de tu lógica para este comando puede seguir aquí...
-                        status_bar_message = f"¡Hundiste el {ship_name} de {id_jugador_afectado}!" # Actualizado para más claridad
-                        print(f"INFO: Servidor informa: El {ship_name} de {id_jugador_afectado} en {sunk_ship_coords_tuples} ha sido hundido.")
+                        status_bar_message = f"¡Hundiste el {ship_name_sunk} de {id_jugador_afectado}!" # Actualizado para más claridad
+                        print(f"INFO: Servidor informa: El {ship_name_sunk} de {id_jugador_afectado} en {sunk_ship_coords_tuples} ha sido hundido.")
                         if sunk_sound: sunk_sound.play()
 
                         sunk_ship_size = 0
                         for cfg_name, cfg_size in SHIPS_CONFIG:
-                            if cfg_name == ship_name:
+                            if cfg_name == ship_name_sunk:
                                 sunk_ship_size = cfg_size
                                 break
                             
                         if sunk_ship_size == 0:
-                            print(f"WARN: Tamaño desconocido para el barco oponente hundido: {ship_name}")
+                            print(f"WARN: Tamaño desconocido para el barco oponente hundido: {ship_name_sunk}")
                             # Puedes asignar un tamaño por defecto o simplemente no añadirlo al log si es crítico
                             # continue 
                         
@@ -397,11 +550,11 @@ def listen_for_server_messages():
                                 if all_r_same and not all_c_same : guessed_orientation = 'H'
                                 elif not all_r_same and all_c_same : guessed_orientation = 'V'
                         
-                        print(f"DEBUG CLIENT: OPPONENT_SHIP_SUNK - TargetPlayer: {id_jugador_afectado}, Ship: {ship_name}, Size: {sunk_ship_size}, Coords: {sunk_ship_coords_tuples}, Guessed Orientation: {guessed_orientation}")
+                        print(f"DEBUG CLIENT: OPPONENT_SHIP_SUNK - TargetPlayer: {id_jugador_afectado}, Ship: {ship_name_sunk}, Size: {sunk_ship_size}, Coords: {sunk_ship_coords_tuples}, Guessed Orientation: {guessed_orientation}")
 
 
                         opponent_sunk_ships_log.append({
-                            "name": ship_name, "size": sunk_ship_size,
+                            "name": ship_name_sunk, "size": sunk_ship_size,
                             "coords": sunk_ship_coords_tuples, "orientation": guessed_orientation
                         })
 
@@ -420,20 +573,23 @@ def listen_for_server_messages():
                         print(f"Error GRAVE procesando OPPONENT_SHIP_SUNK: {e} - Datos: {message}")
 
                 # Reemplazamos YOUR_TURN_AGAIN y OPPONENT_TURN_MSG con esto
-                elif command == "TURN":
-                    next_turn_player_id = parts[1]
+                elif command == "TURN": # [cite: 169]
+                    next_turn_player_id = parts[1] # ID individual
+                    
+                    # Determinar si el next_turn_player_id es de mi equipo o del oponente
+                    # Esta lógica necesita que el cliente conozca la asignación de jugadores a equipos.
+                    # El servidor podría enviar esta información después de que todos se conecten.
+                    # Por ahora, nos basamos en el ID individual para el mensaje.
+                    
                     if next_turn_player_id == player_id_str:
                         current_game_state = STATE_YOUR_TURN
                         status_bar_message = "¡Tu turno! Dispara en el tablero enemigo."
                     else:
                         current_game_state = STATE_OPPONENT_TURN
-                        # Buscamos el nombre del jugador del turno actual
-                        next_turn_player_name = next_turn_player_id
-                        for opp in opponents_info:
-                            if opp['id'] == next_turn_player_id:
-                                next_turn_player_name = opp['name']
-                                break
-                        status_bar_message = f"Turno de {next_turn_player_name}. Esperando..."
+                        # Para mostrar el nombre del equipo del jugador actual, necesitaríamos más info del servidor
+                        # o que el cliente infiera el equipo del next_turn_player_id.
+                        # Por simplicidad, usamos el ID individual por ahora:
+                        status_bar_message = f"Turno del jugador {next_turn_player_id}. Esperando..."
                 
                 elif command == "GAME_OVER": 
                     current_game_state = STATE_GAME_OVER # Esto detendrá el bucle listen_for_server_messages
@@ -555,8 +711,6 @@ def draw_game_grid(surface, offset_x, offset_y, board_matrix, is_my_board):
                     if image_to_draw and ship_detail.get("image_rect_on_board"):
                         surface.blit(image_to_draw, ship_detail["image_rect_on_board"].topleft)
     else: # Es el tablero del oponente
-        if opponent_sunk_ships_log: # Solo imprimir si no está vacía
-            print(f"DEBUG DRAW_GRID (Opponent): opponent_sunk_ships_log = {opponent_sunk_ships_log}") # <--- AÑADIR ESTO
 
         for sunk_info in opponent_sunk_ships_log:
             # ... (lógica existente para dibujar imágenes de barcos hundidos del oponente)
@@ -709,10 +863,6 @@ def check_if_opponent_is_defeated(opponent_b):
         for c in range(GRID_SIZE):
             if opponent_b[r][c] == 'H' or opponent_b[r][c] == 'S': # Cuenta H y S
                 hit_and_sunk_cells_on_opponent += 1
-    if hit_and_sunk_cells_on_opponent >= TOTAL_SHIP_CELLS:
-        # El print de DEBUG ya está en los puntos de llamada
-        return True
-    return False
     
     # Comprobar si el total de celdas impactadas/hundidas alcanza el total de celdas de todos los barcos
     if hit_and_sunk_cells_on_opponent >= TOTAL_SHIP_CELLS:
@@ -725,24 +875,22 @@ is_team_board_slave = False
 
 def game_main_loop():
     global screen, font_large, font_medium, font_small, current_game_state, status_bar_message
-    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound, client_socket, player_name, opponent_name
-    global is_team_board_slave
+    global current_ship_orientation, SERVER_IP, hit_sound, miss_sound, client_socket
+    global g_my_team_name, g_opponent_team_name # Añadir las nuevas globales
+    global is_team_board_slave, player_id_str # is_team_board_slave ya existía
 
     if len(sys.argv) > 1: SERVER_IP = sys.argv[1]
     print(f"Usando IP del servidor: {SERVER_IP}")
 
-    # --- Pedir nombre antes de inicializar el juego ---
-    player_name = prompt_for_player_name()
+    # Ya NO se llama a prompt_for_player_name() aquí al inicio.
 
     pygame.init()
-    
-    # --- Mueve esta línea ARRIBA de la carga de imágenes ---
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption(f"Batalla Naval Cliente")
+    # El título se puede actualizar después de recibir el player_id_str o nombre de equipo
+    pygame.display.set_caption(f"Batalla Naval Cliente") 
     font_large = pygame.font.Font(None, 48)
     font_medium = pygame.font.Font(None, 36)
     font_small = pygame.font.Font(None, 28)
-    # --- Fin del movimiento ---
 
     # --- Inicializar Sonidos ---
     pygame.mixer.init()
@@ -809,27 +957,62 @@ def game_main_loop():
 
     while is_game_running:
         mouse_current_pos = pygame.mouse.get_pos()
+        # --- NUEVO: Manejo del estado para pedir nombre de equipo ---
+        if current_game_state == "AWAITING_TEAM_NAME_INPUT":
+            # Esta es una forma de integrar el prompt en el bucle principal
+            # El hilo de escucha puso el estado, ahora el hilo principal actúa
+            print(f"DEBUG CLIENT [{player_id_str}]: Estado AWAITING_TEAM_NAME_INPUT detectado. Mostrando prompt.")
+            team_name_entered = prompt_for_team_name_gui() # Esta función ahora usa pygame y corre en el hilo principal
+            if team_name_entered:
+                send_message_to_server(f"TEAM_NAME_IS {team_name_entered}")
+                status_bar_message = f"Nombre de equipo '{team_name_entered}' enviado. Esperando al otro equipo..."
+                current_game_state = "WAITING_FOR_TEAM_NAMES" # Nuevo estado para esperar la confirmación de ambos nombres
+            else:
+                # El usuario cerró el prompt o no ingresó nada (prompt_for_team_name_gui debería manejar esto)
+                # Podríamos reenviar REQUEST_TEAM_NAME o usar un default si el servidor no lo maneja
+                status_bar_message = "Ingreso de nombre de equipo cancelado o vacío. Esperando..."
+                # Quizás volver a un estado de espera pasiva o que el servidor re-solicite.
+                # Por ahora, el servidor usará un default si no recibe TEAM_NAME_IS a tiempo.
+                current_game_state = "WAITING_FOR_TEAM_NAMES" # O un estado de error
+                
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 is_game_running = False
             
-            if current_game_state != STATE_GAME_OVER :
+            # Solo procesar eventos de juego si no estamos en medio de un input de nombre de equipo
+            if current_game_state != "AWAITING_TEAM_NAME_INPUT" and current_game_state != STATE_GAME_OVER :
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    # Solo permitir colocar barcos si no es "esclavo" del tablero de equipo
-                    if current_game_state == STATE_SETUP_SHIPS and current_ship_placement_index < len(ships_to_place_list) and not is_team_board_slave:
+                    # ... (lógica de clic para SETUP_SHIPS y YOUR_TURN como la tienes) ...
+                    if current_game_state == STATE_SETUP_SHIPS and current_ship_placement_index < len(ships_to_place_list) and not is_team_board_slave: # [cite: 230]
                         r, c = get_grid_cell_from_mouse(mouse_current_pos, BOARD_OFFSET_X_MY, BOARD_OFFSET_Y)
                         if r is not None and c is not None:
-                            attempt_to_place_ship(my_board_data, r, c, ships_to_place_list[current_ship_placement_index])
+                            attempt_to_place_ship(my_board_data, r, c, ships_to_place_list[current_ship_placement_index]) # [cite: 231]
+                    
                     elif current_game_state == STATE_YOUR_TURN:
-                        r, c = get_grid_cell_from_mouse(mouse_current_pos, BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y)
-                            # ¡AQUÍ ESTÁ EL ARREGLO PRINCIPAL!
-                        # Nos aseguramos de que haya oponentes y la casilla sea válida
-                        if r is not None and c is not None and opponents_info and opponent_board_data[r][c] == 0:
-                            # Usamos el ID del primer oponente de la lista como objetivo
-                            target_id = opponents_info[0]['id'] 
-                            send_message_to_server(f"SHOT {target_id} {r} {c}")
-                            status_bar_message = "Disparo enviado. Esperando resultado..."
-                
+                        r_shot, c_shot = get_grid_cell_from_mouse(mouse_current_pos, BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y)
+
+                        if r_shot is not None and c_shot is not None: # Solo si el clic fue en una celda
+                            cell_val_opp = opponent_board_data[r_shot][c_shot]
+                            opp_info_valid = bool(opponents_info and opponents_info[0].get('id'))
+                            can_shoot_condition = (opp_info_valid and cell_val_opp == 0)
+
+                            # print(f"DEBUG CLIENT [{player_id_str}] Intento Disparo:")
+                            # print(f"   Estado: {current_game_state}")
+                            # print(f"  Clic en: ({r_shot}, {c_shot})")
+                            # print(f"  opponents_info: {opponents_info}") # Ver si tiene IDs
+                            # print(f"  Valor celda oponente [{r_shot}][{c_shot}]: {cell_val_opp}")
+                            # print(f"  Condición 'opponents_info es válido': {opp_info_valid}")
+                            # print(f"  Condición 'celda oponente es 0': {cell_val_opp == 0}")
+                            # print(f"  ¿Se cumple condición para disparar?: {can_shoot_condition}")
+
+                            if can_shoot_condition:
+                                target_id = opponents_info[0]['id'] 
+                                send_message_to_server(f"SHOT {target_id} {r_shot} {c_shot}")
+                                status_bar_message = "Disparo enviado. Esperando resultado..."
+                                print(f"INFO CLIENT [{player_id_str}]: SHOT enviado a {target_id} en ({r_shot},{c_shot})")
+                            else:
+                                status_bar_message = "No se puede disparar en esa celda o no hay oponentes." # Mensaje de UI
+                                print(f"WARN CLIENT [{player_id_str}]: Disparo no realizado. Chequear condiciones de arriba.")
                 if event.type == pygame.KEYDOWN:
                     if current_game_state == STATE_SETUP_SHIPS and not is_team_board_slave:
                         if event.key == pygame.K_r:
@@ -840,12 +1023,25 @@ def game_main_loop():
                             orientation_text = "Horizontal" if current_ship_orientation == 'H' else "Vertical"
                             status_bar_message = f"Coloca: {next_ship_name_display}. Orient: {orientation_text}. 'R' para rotar."
         screen.fill(BLACK)
-        # Mostrar el nombre del oponente en la interfaz
-        draw_text_on_screen(screen, f"Oponente: {opponent_name or '---'}", (SCREEN_WIDTH - 250, 10), font_small)
-        draw_text_on_screen(screen, f"TU FLOTA ({player_id_str or '---'})", (BOARD_OFFSET_X_MY, BOARD_OFFSET_Y - 40), font_medium)
+        
+        # Actualizar título de ventana con nombre de equipo si está disponible
+        window_title = "Batalla Naval Cliente"
+        if g_my_team_name:
+            window_title = f"{g_my_team_name} (Jugador {player_id_str or 'N/A'}) - Batalla Naval"
+        elif player_id_str:
+            window_title = f"Jugador {player_id_str} - Batalla Naval"
+        pygame.display.set_caption(window_title)
+        
+        # Mostrar nombres de equipo
+        draw_text_on_screen(screen, f"Equipo Oponente: {g_opponent_team_name or 'Esperando...'}", (BOARD_OFFSET_X_OPPONENT - 20, 10), font_small) # Ajustado
+        draw_text_on_screen(screen, f"TU EQUIPO ({g_my_team_name or player_id_str or 'Asignando...'})", (BOARD_OFFSET_X_MY, 10), font_small) # Ajustado y pos Y
+
+        # Etiquetas de tableros (se mantienen igual)
+        draw_text_on_screen(screen, "TU FLOTA", (BOARD_OFFSET_X_MY, BOARD_OFFSET_Y - 40), font_medium)
         draw_text_on_screen(screen, "FLOTA ENEMIGA", (BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y - 40), font_medium)
         
-        draw_game_grid(screen, BOARD_OFFSET_X_MY, BOARD_OFFSET_Y, my_board_data, True)
+        # ... (dibujo de rejillas y preview como lo tienes) ...
+        draw_game_grid(screen, BOARD_OFFSET_X_MY, BOARD_OFFSET_Y, my_board_data, True) # [cite: 239]
         draw_game_grid(screen, BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y, opponent_board_data, False)
 
         if current_game_state == STATE_SETUP_SHIPS:
@@ -866,7 +1062,9 @@ def game_main_loop():
     if client_socket:
         print("Cerrando socket del cliente...")
         try:
-            client_socket.shutdown(socket.SHUT_RDWR)
+            # No enviar más mensajes si el juego ha terminado o hay error.
+            # Solo cerrar.
+            # client_socket.shutdown(socket.SHUT_RDWR) # Puede dar error si ya está cerrado
             client_socket.close()
         except Exception as e:
             print(f"Error al cerrar el socket del cliente: {e}")
