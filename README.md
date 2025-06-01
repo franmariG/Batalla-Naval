@@ -1,4 +1,4 @@
-# Batalla Naval
+# Batalla Naval 🚢
 
 Este proyecto es una implementación de un juego de Batalla Naval multijugador en línea para la asignatura Sistemas Distribuidos. El objetivo era desarrollar una versión inicial 1 contra 1 y luego expandirla a un modo multijugador más complejo, específicamente un 2 contra 2. La implementación se enfoca en el uso de sockets y multihilos para manejar las conexiones de los jugadores y la lógica del juego de manera concurrente.
 
