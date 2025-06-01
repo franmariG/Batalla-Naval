@@ -250,91 +250,137 @@ def handle_client_connection(conn, addr):
                         current_game_state_ref["team_details"][player_team_id_check]['name'] = default_team_name 
                         print(f"INFO SERVER [{assigned_player_id}]: Usando nombre de equipo por defecto '{default_team_name}' para {player_team_id_check}.")
 
-        wait_loops = 0
-        max_wait_total = 120 
-        condition_to_wait = True
-        while condition_to_wait:
-            with current_game_state_ref["game_specific_lock"]: 
-                num_clients = len(current_game_state_ref["clients"])
-                all_ready_for_setup = (num_clients == current_game_state_ref["max_players"])
-                if current_game_state_ref["mode"] == 4:
-                    all_ready_for_setup = all_ready_for_setup and \
-                                          current_game_state_ref["team_details"]["TeamA"]["name"] and \
-                                          current_game_state_ref["team_details"]["TeamB"]["name"]
-                condition_to_wait = not all_ready_for_setup
-            
-            if not condition_to_wait:
-                break
+        # --- NUEVA Fase Consolidada de Espera y Señalización de Configuración ---
+        setup_signal_sent_to_this_client = False 
+        # Una bandera en game_state["clients"][assigned_player_id]['got_setup_prompt'] puede rastrear si se enviaron OPPONENT_NAME/TEAMS_INFO y SETUP_YOUR_BOARD.
+        # Inicializa esta bandera cuando el cliente se añade a game_state.
+        # Ejemplo: current_game_state_ref["clients"][assigned_player_id]['got_setup_prompt'] = False
 
-            wait_loops += 1
-            if assigned_player_id not in current_game_state_ref["clients"] or not current_game_state_ref["clients"][assigned_player_id].get('conn'):
-                print(f"DEBUG SERVER [{assigned_player_id}]: Desconectado mientras esperaba a otros/nombres.")
-                return
-            
-            if wait_loops > max_wait_total:
-                print(f"ERROR SERVER [{assigned_player_id}]: Timeout general esperando jugadores/nombres. Terminando hilo de espera.")
-                if current_game_state_ref["mode"] == 4:
-                    with current_game_state_ref["game_specific_lock"]: # Proteger acceso a team_details
-                        if not current_game_state_ref["team_details"]["TeamA"]["name"]: current_game_state_ref["team_details"]["TeamA"]["name"] = "Equipo Alfa" 
-                        if not current_game_state_ref["team_details"]["TeamB"]["name"]: current_game_state_ref["team_details"]["TeamB"]["name"] = "Equipo Bravo" 
-                break 
-            
-            # Leer estado de los nombres de equipo bajo lock para evitar race conditions en el mensaje de espera
-            msg_espera_extra_4p = ""
-            if current_game_state_ref["mode"] == 4:
-                with current_game_state_ref["game_specific_lock"]:
-                    status_team_A = current_game_state_ref['team_details']['TeamA']['name'] or "Pendiente" 
-                    status_team_B = current_game_state_ref['team_details']['TeamB']['name'] or "Pendiente" 
-                msg_espera_extra_4p = f". Nombres Equipo A: {status_team_A}, Equipo B: {status_team_B}"
-            
-            msg_espera_str = f"MSG Esperando jugadores ({num_clients}/{current_game_state_ref['max_players']}){msg_espera_extra_4p}"
-            
-            try:
-                if wait_loops % 5 == 0 or wait_loops == 1:
-                    conn.sendall(f"{msg_espera_str}\n".encode()) 
-            except socket.error:
-                return 
-            time.sleep(1)
+        wait_for_global_readiness_loops = 0
+        # Puedes ajustar este timeout. Es el tiempo máximo que un cliente esperará si la partida nunca se llena.
+        MAX_GLOBAL_WAIT_LOOPS = 180 # ej., 180 segundos (3 minutos)
 
-        # Enviar información de oponentes/equipos
-        with current_game_state_ref["game_specific_lock"]:
-            if current_game_state_ref["mode"] == 2:
-                other_id = "P2" if assigned_player_id == "P1" else "P1"
-                opponent_name = "EsperandoOponente" # Default
+        while not setup_signal_sent_to_this_client and wait_for_global_readiness_loops < MAX_GLOBAL_WAIT_LOOPS:
+            game_is_globally_ready_now = False
+            num_current_clients = 0
+            is_this_client_still_connected = False # Renombrado para claridad
+
+            with current_game_state_ref["game_specific_lock"]:
+                if assigned_player_id not in current_game_state_ref["clients"]:
+                    print(f"DEBUG SERVER [{assigned_player_id}]: Cliente desconectado durante espera de disponibilidad global.")
+                    return # Salir del manejador si el cliente ya no está en el estado del juego
+
+                is_this_client_still_connected = True # Todavía en el diccionario de clientes
+                num_current_clients = len(current_game_state_ref["clients"])
                 
-                if other_id in current_game_state_ref["clients"] and 'name' in current_game_state_ref["clients"][other_id]:
-                    opponent_name = current_game_state_ref["clients"][other_id]['name']
-                conn.sendall(f"OPPONENT_NAME {opponent_name}\n".encode())
+                # Verificar condición de disponibilidad global
+                ready_check = (num_current_clients == current_game_state_ref["max_players"])
+                if current_game_state_ref["mode"] == 4:
+                    all_team_names_set = current_game_state_ref["team_details"]["TeamA"]["name"] and \
+                                         current_game_state_ref["team_details"]["TeamB"]["name"]
+                    ready_check = ready_check and all_team_names_set
+                game_is_globally_ready_now = ready_check
+                
+                # Verificar si este cliente ya recibió su indicación de configuración
+                # Es mejor usar una bandera específica para esto en lugar de player_setup_complete
+                # Asumamos una nueva bandera: current_game_state_ref["clients"][assigned_player_id].get('setup_prompt_sent', False)
+                # Asegúrate de que esta bandera se inicialice a False cuando un jugador se une.
+                # Para este ejemplo, lo simularemos con setup_signal_sent_to_this_client por simplicidad,
+                # pero una bandera persistente en game_state es mejor.
 
-            elif current_game_state_ref["mode"] == 4:
-                my_team_id_final = current_game_state_ref["clients"][assigned_player_id]['team_id'] 
-                my_team_name_final = current_game_state_ref["team_details"][my_team_id_final]['name'] 
-                opponent_team_id_final = "TeamB" if my_team_id_final == "TeamA" else "TeamA" 
-                opponent_team_name_final = current_game_state_ref["team_details"][opponent_team_id_final]['name'] 
-                opponent_member_ids = current_game_state_ref["team_details"][opponent_team_id_final]['members'] 
-                opponent_ids_payload = " ".join(opponent_member_ids) 
-                teams_info_final_msg = f"TEAMS_INFO_FINAL {my_team_name_final.replace(' ', '_')} {opponent_team_name_final.replace(' ', '_')} {opponent_ids_payload}\n" 
-                conn.sendall(teams_info_final_msg.encode()) 
+            if game_is_globally_ready_now:
+                with current_game_state_ref["game_specific_lock"]: # Readquirir el lock para modificación/envío seguro
+                    # Verificar si este cliente aún necesita la indicación de configuración
+                    # Esta verificación debería usar una bandera persistente. Por ahora, dependemos de la condición del bucle.
 
-        # Enviar SETUP_YOUR_BOARD
-        send_setup_board = False
-        if current_game_state_ref["mode"] == 2:
-            send_setup_board = True
-        elif current_game_state_ref["mode"] == 4 and assigned_player_id in ("P1", "P3"): 
-            send_setup_board = True
+                    # Determinar si este cliente es un "jugador de configuración" (P1/P2 para 2J, P1/P3 para 4J)
+                    is_primary_setup_player = (current_game_state_ref["mode"] == 2) or \
+                                              (current_game_state_ref["mode"] == 4 and assigned_player_id in ("P1", "P3"))
+
+                    if is_primary_setup_player:
+                        # Enviar OPPONENT_NAME / TEAMS_INFO_FINAL primero
+                        if current_game_state_ref["mode"] == 2:
+                            other_id = "P2" if assigned_player_id == "P1" else "P1"
+                            # Asegurar que el cliente other_id exista y tenga un nombre, o usar predeterminado
+                            opponent_name = current_game_state_ref.get("clients", {}).get(other_id, {}).get('name', "Oponente")
+                            conn.sendall(f"OPPONENT_NAME {opponent_name.replace(' ', '_')}\n".encode()) # 
+                        elif current_game_state_ref["mode"] == 4: # P1 o P3 (capitanes)
+                            my_team_id_final = current_game_state_ref["clients"][assigned_player_id]['team_id']
+                            my_team_name_final = current_game_state_ref["team_details"][my_team_id_final]['name'] or f"Equipo_{my_team_id_final[-1]}"
+                            opponent_team_id_final = "TeamB" if my_team_id_final == "TeamA" else "TeamA"
+                            opponent_team_name_final = current_game_state_ref["team_details"][opponent_team_id_final]['name'] or f"Equipo_{opponent_team_id_final[-1]}"
+                            opponent_member_ids = current_game_state_ref["team_members_map"].get(opponent_team_id_final, [])
+                            opponent_ids_payload = " ".join(opponent_member_ids)
+                            teams_info_final_msg = f"TEAMS_INFO_FINAL {my_team_name_final.replace(' ', '_')} {opponent_team_name_final.replace(' ', '_')} {opponent_ids_payload}\n" # 
+                            conn.sendall(teams_info_final_msg.encode())
+                        
+                        conn.sendall(b"SETUP_YOUR_BOARD\n") # 
+                        print(f"DEBUG SERVER [{assigned_player_id}]: Enviado OPPONENT_NAME/TEAMS_INFO_FINAL y SETUP_YOUR_BOARD (partida globalmente lista).")
+                        # Marcar que este cliente ha recibido la indicación para prevenir reenvío (idealmente usando una bandera persistente)
+                        # current_game_state_ref["clients"][assigned_player_id]['setup_prompt_sent'] = True
+                        setup_signal_sent_to_this_client = True # Salir del bucle de espera de este manejador
+                    
+                    elif current_game_state_ref["mode"] == 4 and assigned_player_id in ("P2", "P4"):
+                        # Jugadores no capitanes en modo 4J (P2, P4) necesitan TEAMS_INFO_FINAL y luego esperar TEAM_BOARD
+                        my_team_id_final = current_game_state_ref["clients"][assigned_player_id]['team_id']
+                        my_team_name_final = current_game_state_ref["team_details"][my_team_id_final]['name'] or f"Equipo_{my_team_id_final[-1]}"
+                        opponent_team_id_final = "TeamB" if my_team_id_final == "TeamA" else "TeamA"
+                        opponent_team_name_final = current_game_state_ref["team_details"][opponent_team_id_final]['name'] or f"Equipo_{opponent_team_id_final[-1]}"
+                        opponent_member_ids = current_game_state_ref["team_members_map"].get(opponent_team_id_final, [])
+                        opponent_ids_payload = " ".join(opponent_member_ids)
+                        teams_info_final_msg = f"TEAMS_INFO_FINAL {my_team_name_final.replace(' ', '_')} {opponent_team_name_final.replace(' ', '_')} {opponent_ids_payload}\n" # 
+                        conn.sendall(teams_info_final_msg.encode())
+                        print(f"DEBUG SERVER [{assigned_player_id}]: Enviado TEAMS_INFO_FINAL. Esperando TEAM_BOARD del capitán.")
+                        # Marcar indicación enviada y salir del bucle de espera para este manejador
+                        # current_game_state_ref["clients"][assigned_player_id]['setup_prompt_sent'] = True
+                        setup_signal_sent_to_this_client = True 
+                # Fin de la sección crítica con lock
+            else:
+                # La partida aún no está globalmente lista. Enviar un mensaje de espera.
+                msg_parts = [f"MSG Esperando jugadores ({num_current_clients}/{current_game_state_ref['max_players']})"]
+                if current_game_state_ref["mode"] == 4:
+                    # Acceder de forma segura a los nombres de los equipos para el mensaje de estado
+                    team_a_name_status = "Pendiente"
+                    team_b_name_status = "Pendiente"
+                    with current_game_state_ref["game_specific_lock"]:
+                         team_a_name_status = current_game_state_ref["team_details"]["TeamA"]["name"] or "Pendiente"
+                         team_b_name_status = current_game_state_ref["team_details"]["TeamB"]["name"] or "Pendiente"
+                    msg_parts.append(f". Nombres Equipo A: {team_a_name_status}, Equipo B: {team_b_name_status}")
+                
+                full_wait_msg = "".join(msg_parts)
+                
+                # Enviar mensaje periódicamente
+                if wait_for_global_readiness_loops % 5 == 0 or wait_for_global_readiness_loops == 0:
+                    try:
+                        conn.sendall(f"{full_wait_msg}\n".encode()) # 
+                    except socket.error:
+                        print(f"DEBUG SERVER [{assigned_player_id}]: Error de socket durante envío de espera global. Cliente probablemente desconectado.")
+                        return # Salir del manejador
+                
+                wait_for_global_readiness_loops += 1
+                time.sleep(1) # Esperar antes de volver a verificar el estado global
+
+        # Después del bucle:
+        if not is_this_client_still_connected: # Doble verificación por si el cliente se desconectó
+             return 
+
+        if not setup_signal_sent_to_this_client and wait_for_global_readiness_loops >= MAX_GLOBAL_WAIT_LOOPS:
+            # El manejador de este cliente específico expiró esperando que la partida estuviera globalmente lista.
+            print(f"ERROR SERVER [{assigned_player_id}]: Timeout global ({MAX_GLOBAL_WAIT_LOOPS}s) esperando que la partida esté lista. ({num_current_clients}/{current_game_state_ref['max_players']}).")
+            try:
+                conn.sendall(b"MSG Error: Timeout esperando que la partida este completamente lista. Desconectando.\n")
+            except socket.error:
+                pass # El cliente podría haberse ido ya
+            # El bloque finally de handle_client_connection se encargará de la limpieza.
+            return # Salir de este manejador.
         
-        # player_setup_complete se accede aquí, idealmente bajo lock si hay riesgo de modificación concurrente.
-        # Sin embargo, en este punto, solo se lee para el assigned_player_id actual.
-        # Y len(clients) también.
-        is_player_setup_done = False
-        num_connected_clients = 0
-        with current_game_state_ref["game_specific_lock"]: # Asegurar lectura consistente
-            is_player_setup_done = current_game_state_ref["player_setup_complete"].get(assigned_player_id, False)
-            num_connected_clients = len(current_game_state_ref["clients"])
+        # Si setup_signal_sent_to_this_client es true aquí, el cliente de este manejador recibió su indicación.
+        # Si es false aquí, significa que es un jugador P2/P4 que recibió TEAMS_INFO y ahora está listo para el bucle principal.
+        # (Esta condición necesita refinamiento si P2/P4 no deben continuar si la partida no se preparó)
+        # La lógica anterior tiene como objetivo asegurar que P2/P4 también solo continúen si game_is_globally_ready_now fue true.
 
-        if send_setup_board and num_connected_clients == current_game_state_ref["max_players"] and not is_player_setup_done:
-            conn.sendall(b"SETUP_YOUR_BOARD\n") 
-            print(f"DEBUG [{assigned_player_id}]: Enviado SETUP_YOUR_BOARD.")
+        print(f"DEBUG SERVER [{assigned_player_id}]: Finalizada fase de espera global. Procediendo al bucle principal de mensajes.")
+        # ----- Fin de la NUEVA Fase Consolidada de Espera y Señalización de Configuración ---
         
         while True:
             data_bytes = conn.recv(1024) 
