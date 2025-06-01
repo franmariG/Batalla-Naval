@@ -18,8 +18,8 @@ BUTTON_HOVER_COLOR = (100, 149, 237)
 BUTTON_TEXT_COLOR = WHITE
 
 # Usaremos la IP del servidor 
-SERVER_HOST_FOR_LIST = "169.254.107.4" # Asegúrate que sea la IP correcta de tu servidor
-SERVER_PORT_FOR_LIST = 8080
+SERVER_HOST_FOR_LIST = "172.23.43.50" # Asegúrate que sea la IP correcta de tu servidor
+SERVER_PORT_FOR_LIST = 8000
 
 def draw_gradient_background(surface, color1, color2):
     """Dibuja un fondo degradado vertical."""

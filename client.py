@@ -6,8 +6,8 @@ import sys
 import time
 import os
 
-DEFAULT_SERVER_IP = "169.254.107.4" # IP del servidor
-PORT = 8080 
+DEFAULT_SERVER_IP = "172.23.43.50" # IP del servidor
+PORT = 8000
 
 # --- Configuración de Pygame ---
 SCREEN_WIDTH = 900 

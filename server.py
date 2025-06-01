@@ -4,8 +4,8 @@ import threading
 import time
 
 # Usar la IP del servidor 
-HOST = "169.254.107.4" # Asegúrate que sea la IP correcta de tu servidor
-PORT = 8080
+HOST = "172.23.43.50" # Asegúrate que sea la IP correcta de tu servidor
+PORT = 8000
 
 # active_games almacenará el estado de todas las partidas activas.
 # La clave será el game_id, el valor será el diccionario del estado de la partida.
