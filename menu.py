@@ -21,38 +21,56 @@ BUTTON_TEXT_COLOR = WHITE
 SERVER_HOST_FOR_LIST = "169.254.107.4" # Asegúrate que sea la IP correcta de tu servidor
 SERVER_PORT_FOR_LIST = 8080
 
+def draw_gradient_background(surface, color1, color2):
+    """Dibuja un fondo degradado vertical."""
+    for y in range(SCREEN_HEIGHT):
+        ratio = y / SCREEN_HEIGHT
+        r = int(color1[0] * (1 - ratio) + color2[0] * ratio)
+        g = int(color1[1] * (1 - ratio) + color2[1] * ratio)
+        b = int(color1[2] * (1 - ratio) + color2[2] * ratio)
+        pygame.draw.line(surface, (r, g, b), (0, y), (SCREEN_WIDTH, y))
+
 def draw_button(surface, rect, text, font, is_hovered):
+    """Dibuja un botón con efecto de sombra en el texto."""
     color = BUTTON_HOVER_COLOR if is_hovered else BUTTON_COLOR
     pygame.draw.rect(surface, color, rect, border_radius=8)
     text_surf = font.render(text, True, BUTTON_TEXT_COLOR)
+    text_shadow = font.render(text, True, (0, 0, 0))  # Sombra negra
     text_rect = text_surf.get_rect(center=rect.center)
+    shadow_offset = 2
+    surface.blit(text_shadow, (text_rect.x + shadow_offset, text_rect.y + shadow_offset))
     surface.blit(text_surf, text_rect)
 
 def crear_partida_menu():
+    global SCREEN_WIDTH, SCREEN_HEIGHT  # Declarar variables globales
     pygame.init()
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT)) #
-    pygame.display.set_caption("Crear Partida - BattleShip") #
-    font_title = pygame.font.Font(None, 60) #
-    font_button = pygame.font.Font(None, 44) #
-    font_small = pygame.font.Font(None, 32) #
-
-    button_width = 250 #
-    button_height = 60 #
-    spacing = 40 #
-    start_y = SCREEN_HEIGHT // 2 - button_height - spacing // 2 #
-
-    btn_2j = pygame.Rect((SCREEN_WIDTH - button_width)//2, start_y, button_width, button_height) #
-    btn_4j = pygame.Rect((SCREEN_WIDTH - button_width)//2, start_y + button_height + spacing, button_width, button_height) #
-    btn_atras = pygame.Rect(20, 20, 120, 44) #
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
+    pygame.display.set_caption("Crear Partida - Batalla Naval") #
+    font_title = pygame.font.Font(pygame.font.match_font('arial'), 60)
+    font_button = pygame.font.Font(pygame.font.match_font('arial'), 44)
+    font_small = pygame.font.Font(pygame.font.match_font('arial'), 32)
 
     running = True #
     while running:
-        mouse_pos = pygame.mouse.get_pos() #
         screen.fill(BLACK) #
-
+        draw_gradient_background(screen, (30, 30, 60), (10, 10, 30))  # Fondo degradado
+        
+        # Ajustar tamaños y posiciones dinámicamente
+        width, height = screen.get_size()
+        button_width = width // 3
+        button_height = height // 10
+        spacing = height // 20
+        start_y = height // 2 - button_height - spacing // 2
+        
+        btn_2j = pygame.Rect((width - button_width) // 2, start_y, button_width, button_height)
+        btn_4j = pygame.Rect((width - button_width) // 2, start_y + button_height + spacing, button_width, button_height)
+        btn_atras = pygame.Rect(20, 20, 120, 44)
+        
+        mouse_pos = pygame.mouse.get_pos() #
+            
         title_surf = font_title.render("¿Cuántos jugadores?", True, WHITE) #
-        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 120)) #
-        screen.blit(title_surf, title_rect) #
+        title_rect = title_surf.get_rect(center=(width // 2, height // 5))
+        screen.blit(title_surf, title_rect)
 
         is_hovered_2j = btn_2j.collidepoint(mouse_pos) #
         draw_button(screen, btn_2j, "2 jugadores", font_button, is_hovered_2j) #
@@ -69,6 +87,11 @@ def crear_partida_menu():
             if event.type == pygame.QUIT: #
                 pygame.quit() #
                 sys.exit() #
+                
+            if event.type == pygame.VIDEORESIZE:
+                SCREEN_WIDTH, SCREEN_HEIGHT = event.w, event.h  # Modificar variables globales
+                screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
+
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1: #
                 if btn_2j.collidepoint(event.pos):
                     pygame.quit()
@@ -113,10 +136,10 @@ def obtener_partidas_disponibles():
 def unirse_partida_menu():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT)) #
-    pygame.display.set_caption("Unirse a Partida - BattleShip") #
-    font_title = pygame.font.Font(None, 60) #
-    font_button = pygame.font.Font(None, 44) #
-    font_small = pygame.font.Font(None, 32) #
+    pygame.display.set_caption("Unirse a Partida - Batalla Naval") #
+    font_title = pygame.font.Font(pygame.font.match_font('arial'), 60) #
+    font_button = pygame.font.Font(pygame.font.match_font('arial'), 44) #
+    font_small = pygame.font.Font(pygame.font.match_font('arial'), 32) #
 
     button_width = 450 # Aumentado para más texto
     button_height = 60 #
@@ -184,9 +207,9 @@ def unirse_partida_menu():
 def menu_loop():
     pygame.init() #
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT)) #
-    pygame.display.set_caption("BattleShip - Menú") #
-    font_title = pygame.font.Font(None, 80) #
-    font_button = pygame.font.Font(None, 48) #
+    pygame.display.set_caption("Batalla Naval- Menú") #
+    font_title = pygame.font.Font(pygame.font.match_font('arial'), 80) #
+    font_button = pygame.font.Font(pygame.font.match_font('arial'), 48) #
 
     button_width = 320 #
     button_height = 60 #
@@ -204,8 +227,9 @@ def menu_loop():
         mouse_pos = pygame.mouse.get_pos() #
         screen.fill(BLACK) #
 
-        title_surf = font_title.render("BattleShip", True, WHITE) #
-        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, 120)) #
+        # Ajustar la posición del título para que quede más abajo
+        title_surf = font_title.render("Batalla Naval", True, WHITE) #
+        title_rect = title_surf.get_rect(center=(SCREEN_WIDTH//2, start_y - button_height - spacing))
         screen.blit(title_surf, title_rect) #
 
         for btn in buttons: #
