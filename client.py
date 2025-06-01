@@ -7,7 +7,7 @@ import time
 import os # Para construir rutas a los archivos de sonido
 
 # --- Configuración de Conexión ---
-SERVER_IP = "172.23.43.50"
+SERVER_IP = "169.254.107.4"
 PORT = 8080
 
 # --- Configuración de Pygame ---
@@ -64,6 +64,9 @@ current_ship_orientation = 'H'
 my_placed_ships_detailed = [] 
 opponent_sunk_ships_log = [] # NUEVO: Para barcos hundidos del oponente
                              # Estructura: {"name": str, "size": int, "coords": [(r,c),...], "orientation": 'H'/'V' o None}
+
+# --- NUEVA VARIABLE ---
+opponents_info = [] # Almacenará los IDs y nombres de los oponentes
 
 # Estructura de cada elemento en my_placed_ships_detailed:
 # { "name": str, "size": int, "coords": [(r,c), ...], "orientation": 'H'/'V', 
@@ -238,7 +241,27 @@ def listen_for_server_messages():
                     current_game_state = STATE_WAITING_OPPONENT_SETUP
                     status_bar_message = "Esperando a que el oponente termine la configuración..."
                     continue
+                if command == "TEAM_INFO":
+                    try:
+                        # Limpiamos la lista de oponentes por si acaso
+                        opponents_info.clear()
+                        # Los oponentes vienen en pares (id, nombre) a partir del índice 3
+                        for i in range(3, len(parts), 2):
+                            if i + 1 < len(parts):
+                                opp_id = parts[i]
+                                opp_name = parts[i+1]
+                                opponents_info.append({'id': opp_id, 'name': opp_name})
 
+                        # Extraer el nombre del primer oponente para mostrarlo
+                        if opponents_info:
+                            opponent_name = opponents_info[0]['name'] # Muestra el nombre de uno de los oponentes
+
+                        print(f"Oponentes identificados: {[o['name'] for o in opponents_info]}")
+
+                    except IndexError:
+                        print("Error procesando TEAM_INFO.")
+                    continue
+                
                 if command == "MSG":
                     status_bar_message = ' '.join(parts[1:])
                 elif command == "PLAYER_ID":
@@ -272,51 +295,85 @@ def listen_for_server_messages():
                     send_message_to_server(f"RESULT {r} {c} {shot_result_char}")
 
                 elif command == "UPDATE": 
-                    r, c = int(parts[1]), int(parts[2])
-                    result_char = parts[3] 
-                    
-                    current_cell_state_on_opponent_board = opponent_board_data[r][c]
+                    try:
+                        target_player_id = parts[1] # ID de un jugador del equipo que recibió el disparo
+                        r, c = int(parts[2]), int(parts[3])
+                        result_char = parts[4]
+                        current_cell_state_on_opponent_board = opponent_board_data[r][c]
 
-                    if result_char == 'H':
-                        # Solo marcar como 'H' si no es ya 'S' (parte de un barco ya confirmado hundido).
-                        # Si es 'S', significa que OPPONENT_SHIP_SUNK llegó primero para esta celda.
-                        if current_cell_state_on_opponent_board != 'S':
-                            opponent_board_data[r][c] = 'H'
-                        
-                        if hit_sound: hit_sound.play()
+                        # Comprobar si el jugador afectado es un oponente
+                        is_opponent_target = any(opp['id'] == target_player_id for opp in opponents_info)
 
-                        # Chequear victoria DESPUÉS de actualizar el estado de la celda.
-                        is_victory = check_if_opponent_is_defeated(opponent_board_data)
-                        hits_count = 0 
-                        for r_debug in range(GRID_SIZE):
-                            for c_debug in range(GRID_SIZE):
-                                if opponent_board_data[r_debug][c_debug] == 'H' or opponent_board_data[r_debug][c_debug] == 'S':
-                                    hits_count +=1
-                        print(f"DEBUG CLIENT (en UPDATE): Chequeando victoria. Celdas H/S oponente: {hits_count}/{TOTAL_SHIP_CELLS}. ¿Victoria?: {is_victory}")
+                        if is_opponent_target:
+                            # Actualizamos nuestro tablero de oponente
+                            if result_char == 'H':
+                                # Solo marcar como 'H' si no es ya 'S' (parte de un barco ya confirmado hundido).
+                                # Si es 'S', significa que OPPONENT_SHIP_SUNK llegó primero para esta celda.
+                                if current_cell_state_on_opponent_board != 'S':
+                                    opponent_board_data[r][c] = 'H'
+                                if hit_sound: hit_sound.play()
+                            elif result_char == 'M':
+                                # Solo marcar como 'M' si no es 'S'. Un fallo no debería afectar un barco hundido.
+                                if current_cell_state_on_opponent_board != 'S':
+                                    opponent_board_data[r][c] = 'M'
+                                if miss_sound: miss_sound.play()
+                            # La lógica de victoria ya existente funciona bien aquí
+                            if check_if_opponent_is_defeated(opponent_board_data):
+                                send_message_to_server("GAME_WON")
+                        else:
+                            # El afectado es de nuestro equipo, actualizamos nuestro propio tablero
+                            if my_board_data[r][c] == 1 and result_char == 'H':
+                                my_board_data[r][c] = 'H'
+                                check_and_update_my_sunk_ships()
+                            elif my_board_data[r][c] == 0 and result_char == 'M':
+                                my_board_data[r][c] = 'M'
 
-                        if is_victory and current_game_state != STATE_GAME_OVER:
-                            print(f"DEBUG CLIENT (en UPDATE): ¡Victoria local detectada! Enviando GAME_WON.")
-                            send_message_to_server("GAME_WON")
-                            # No cambiar current_game_state aquí, esperar GAME_OVER del servidor.
-                    
-                    elif result_char == 'M':
-                        # Solo marcar como 'M' si no es 'S'. Un fallo no debería afectar un barco hundido.
-                        if current_cell_state_on_opponent_board != 'S':
-                            opponent_board_data[r][c] = 'M'
-                        status_bar_message = f"Agua en ({r},{c})." 
-                        if miss_sound: miss_sound.play()
+                    except (IndexError, ValueError):
+                        print(f"Error procesando UPDATE: {message}")
                     
                     # El mensaje de status_bar_message se actualizará con YOUR_TURN_AGAIN o OPPONENT_TURN_MSG
                 elif command == "OPPONENT_SHIP_SUNK": 
                     try:
-                        ship_name = parts[1]
-                        flat_coords = [int(p) for p in parts[2:]]
-                        sunk_ship_coords_tuples = []
-                        for i in range(0, len(flat_coords), 2):
-                            sunk_ship_coords_tuples.append((flat_coords[i], flat_coords[i+1]))
+                        # Formato esperado del servidor: OPPONENT_SHIP_SUNK {ID_AFECTADO} {NOMBRE_BARCO} {coords...}
+                        # parts[0] = "OPPONENT_SHIP_SUNK"
+                        # parts[1] = ID del jugador cuyo barco fue hundido (ej. "P3")
+                        # parts[2] = Nombre del barco (ej. "Battleship")
+                        # parts[3:]= Coordenadas como strings (ej. "9", "5", "9", "6", ...)
 
-                        status_bar_message = f"¡Hundiste el {ship_name} del oponente!"
-                        print(f"INFO: Servidor informa: El {ship_name} del oponente en {sunk_ship_coords_tuples} ha sido hundido.")
+                        if len(parts) < 4: # Mínimo: COMANDO, ID_AFECTADO, NOMBRE_BARCO, R1, C1
+                            print(f"Error: Mensaje OPPONENT_SHIP_SUNK malformado (muy corto): {message}")
+                            continue
+
+                        id_jugador_afectado = parts[1] # ID del jugador cuyo barco se hundió
+                        ship_name = parts[2]           # Nombre del barco hundido
+                        
+                        # Las coordenadas comienzan desde parts[3]
+                        flat_coords_str = parts[3:]
+                        
+                        # Convertir coordenadas a enteros
+                        sunk_ship_coords_tuples = []
+                        if len(flat_coords_str) % 2 != 0:
+                            print(f"Error: Número impar de componentes de coordenadas en OPPONENT_SHIP_SUNK: {flat_coords_str}")
+                            continue # Saltar este mensaje si las coordenadas son inválidas
+
+                        for i in range(0, len(flat_coords_str), 2):
+                            try:
+                                r_coord = int(flat_coords_str[i])
+                                c_coord = int(flat_coords_str[i+1])
+                                sunk_ship_coords_tuples.append((r_coord, c_coord))
+                            except ValueError:
+                                print(f"Error: Coordenada no entera en OPPONENT_SHIP_SUNK: '{flat_coords_str[i]}' o '{flat_coords_str[i+1]}'")
+                                # Podrías decidir saltar este barco o manejar el error de otra forma
+                                sunk_ship_coords_tuples.clear() # No procesar barco con coords inválidas
+                                break
+                        
+                        if not sunk_ship_coords_tuples: # Si hubo error en las coordenadas o no hay
+                             print(f"Advertencia: No se procesaron coordenadas para OPPONENT_SHIP_SUNK {ship_name}.")
+                             continue
+                         
+                        # El resto de tu lógica para este comando puede seguir aquí...
+                        status_bar_message = f"¡Hundiste el {ship_name} de {id_jugador_afectado}!" # Actualizado para más claridad
+                        print(f"INFO: Servidor informa: El {ship_name} de {id_jugador_afectado} en {sunk_ship_coords_tuples} ha sido hundido.")
                         if sunk_sound: sunk_sound.play()
 
                         sunk_ship_size = 0
@@ -324,14 +381,24 @@ def listen_for_server_messages():
                             if cfg_name == ship_name:
                                 sunk_ship_size = cfg_size
                                 break
+                            
+                        if sunk_ship_size == 0:
+                            print(f"WARN: Tamaño desconocido para el barco oponente hundido: {ship_name}")
+                            # Puedes asignar un tamaño por defecto o simplemente no añadirlo al log si es crítico
+                            # continue 
                         
                         guessed_orientation = None
-                        if len(sunk_ship_coords_tuples) > 0:
-                            all_r_same = all(coord[0] == sunk_ship_coords_tuples[0][0] for coord in sunk_ship_coords_tuples)
-                            all_c_same = all(coord[1] == sunk_ship_coords_tuples[0][1] for coord in sunk_ship_coords_tuples)
-                            if all_r_same and not all_c_same : guessed_orientation = 'H'
-                            elif not all_r_same and all_c_same : guessed_orientation = 'V'
-                            elif sunk_ship_size == 1: guessed_orientation = 'H'
+                        if len(sunk_ship_coords_tuples) > 0 : # Solo si tenemos coordenadas
+                            if sunk_ship_size == 1: # Para barcos de una celda
+                                guessed_orientation = 'H' # O 'V', según tu imagen base
+                            elif len(sunk_ship_coords_tuples) > 1 :
+                                all_r_same = all(coord[0] == sunk_ship_coords_tuples[0][0] for coord in sunk_ship_coords_tuples)
+                                all_c_same = all(coord[1] == sunk_ship_coords_tuples[0][1] for coord in sunk_ship_coords_tuples)
+                                if all_r_same and not all_c_same : guessed_orientation = 'H'
+                                elif not all_r_same and all_c_same : guessed_orientation = 'V'
+                        
+                        print(f"DEBUG CLIENT: OPPONENT_SHIP_SUNK - TargetPlayer: {id_jugador_afectado}, Ship: {ship_name}, Size: {sunk_ship_size}, Coords: {sunk_ship_coords_tuples}, Guessed Orientation: {guessed_orientation}")
+
 
                         opponent_sunk_ships_log.append({
                             "name": ship_name, "size": sunk_ship_size,
@@ -344,34 +411,29 @@ def listen_for_server_messages():
                             if 0 <= r_s < GRID_SIZE and 0 <= c_s < GRID_SIZE:
                                 opponent_board_data[r_s][c_s] = 'S' 
                         
-                        # AHORA, chequear victoria OTRA VEZ, ya que el estado 'S' es definitivo.
-                        is_victory_after_sunk = check_if_opponent_is_defeated(opponent_board_data)
-                        hits_count_after_sunk = 0
-                        for r_debug in range(GRID_SIZE):
-                            for c_debug in range(GRID_SIZE):
-                                if opponent_board_data[r_debug][c_debug] == 'H' or opponent_board_data[r_debug][c_debug] == 'S':
-                                    hits_count_after_sunk +=1
-                        print(f"DEBUG CLIENT (en OPPONENT_SHIP_SUNK): Chequeando victoria. Celdas H/S oponente: {hits_count_after_sunk}/{TOTAL_SHIP_CELLS}. ¿Victoria?: {is_victory_after_sunk}")
-
-                        if is_victory_after_sunk and current_game_state != STATE_GAME_OVER:
+                        if check_if_opponent_is_defeated(opponent_board_data) and current_game_state != STATE_GAME_OVER:
                             print(f"DEBUG CLIENT (en OPPONENT_SHIP_SUNK): ¡Victoria local detectada! Enviando GAME_WON.")
                             send_message_to_server("GAME_WON")
 
                     except Exception as e:
-                        print(f"Error procesando OPPONENT_SHIP_SUNK: {e} - Datos: {message}")
+                        # El error original se debía a los índices. Con los cambios, este catch podría capturar otros problemas.
+                        print(f"Error GRAVE procesando OPPONENT_SHIP_SUNK: {e} - Datos: {message}")
 
-                elif command == "YOUR_TURN_AGAIN": 
-                    current_game_state = STATE_YOUR_TURN
-                    # Mantener el mensaje de impacto/agua si fue el último, o poner "Tu turno"
-                    if not status_bar_message.startswith("¡Impacto") and not status_bar_message.startswith("Agua"):
-                        status_bar_message = "¡Tu turno! Dispara."
-                    else: # Añadir al mensaje de impacto/agua que sigue siendo nuestro turno
-                        status_bar_message += " ¡Sigue tu turno!"
-
-
-                elif command == "OPPONENT_TURN_MSG": 
-                    current_game_state = STATE_OPPONENT_TURN
-                    status_bar_message = "Turno del oponente. Esperando..."
+                # Reemplazamos YOUR_TURN_AGAIN y OPPONENT_TURN_MSG con esto
+                elif command == "TURN":
+                    next_turn_player_id = parts[1]
+                    if next_turn_player_id == player_id_str:
+                        current_game_state = STATE_YOUR_TURN
+                        status_bar_message = "¡Tu turno! Dispara en el tablero enemigo."
+                    else:
+                        current_game_state = STATE_OPPONENT_TURN
+                        # Buscamos el nombre del jugador del turno actual
+                        next_turn_player_name = next_turn_player_id
+                        for opp in opponents_info:
+                            if opp['id'] == next_turn_player_id:
+                                next_turn_player_name = opp['name']
+                                break
+                        status_bar_message = f"Turno de {next_turn_player_name}. Esperando..."
                 
                 elif command == "GAME_OVER": 
                     current_game_state = STATE_GAME_OVER # Esto detendrá el bucle listen_for_server_messages
@@ -493,6 +555,9 @@ def draw_game_grid(surface, offset_x, offset_y, board_matrix, is_my_board):
                     if image_to_draw and ship_detail.get("image_rect_on_board"):
                         surface.blit(image_to_draw, ship_detail["image_rect_on_board"].topleft)
     else: # Es el tablero del oponente
+        if opponent_sunk_ships_log: # Solo imprimir si no está vacía
+            print(f"DEBUG DRAW_GRID (Opponent): opponent_sunk_ships_log = {opponent_sunk_ships_log}") # <--- AÑADIR ESTO
+
         for sunk_info in opponent_sunk_ships_log:
             # ... (lógica existente para dibujar imágenes de barcos hundidos del oponente)
             ship_name = sunk_info["name"]
@@ -757,8 +822,12 @@ def game_main_loop():
                             attempt_to_place_ship(my_board_data, r, c, ships_to_place_list[current_ship_placement_index])
                     elif current_game_state == STATE_YOUR_TURN:
                         r, c = get_grid_cell_from_mouse(mouse_current_pos, BOARD_OFFSET_X_OPPONENT, BOARD_OFFSET_Y)
-                        if r is not None and c is not None and opponent_board_data[r][c] == 0:
-                            send_message_to_server(f"SHOT {r} {c}")
+                            # ¡AQUÍ ESTÁ EL ARREGLO PRINCIPAL!
+                        # Nos aseguramos de que haya oponentes y la casilla sea válida
+                        if r is not None and c is not None and opponents_info and opponent_board_data[r][c] == 0:
+                            # Usamos el ID del primer oponente de la lista como objetivo
+                            target_id = opponents_info[0]['id'] 
+                            send_message_to_server(f"SHOT {target_id} {r} {c}")
                             status_bar_message = "Disparo enviado. Esperando resultado..."
                 
                 if event.type == pygame.KEYDOWN:

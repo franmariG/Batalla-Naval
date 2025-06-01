@@ -1,3 +1,5 @@
+#menu.py
+
 import pygame
 import sys
 import os
@@ -83,7 +85,7 @@ def obtener_partidas_disponibles():
     Solicita al servidor la lista de partidas disponibles.
     Retorna una lista de diccionarios con 'nombre_creador', 'id', 'jugadores_conectados', 'max_jugadores'.
     """
-    SERVER_HOST = "172.23.43.50"
+    SERVER_HOST = "169.254.107.4"
     SERVER_PORT = 8080
     partidas = []
     try:

@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 
-HOST = "172.23.43.50"
+HOST = "169.254.107.4"
 PORT = 8080
 MAX_PLAYERS = 4
 
@@ -185,6 +185,17 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     f"UPDATE {player_id} {r_res} {c_res} {result_char}\n".encode(),
                     target_player_ids=[original_shooter_id]
                 )
+                # --- LÓGICA MODIFICADA PARA NOTIFICAR A TODOS ---
+
+                # `player_id` es el ID del jugador que fue "objetivo" del disparo (ej. P3)
+                # `original_shooter_id` es el ID del que disparó (ej. P1)
+
+                # Notificamos a todos los jugadores. El mensaje UPDATE lleva el ID
+                # del equipo afectado, para que cada cliente sepa qué tablero actualizar.
+                update_message = f"UPDATE {player_id} {r_res} {c_res} {result_char}\n".encode()
+                notify_players(update_message) # Envía a todos los clientes conectados
+
+                # La lógica de turnos permanece igual
                 with turn_lock:
                     if not game_active:
                         continue
@@ -193,11 +204,14 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     else:
                         current_turn_index = (current_turn_index + 1) % MAX_PLAYERS
                         current_turn_player_id = turn_order[current_turn_index]
-                    for pid in clients:
-                        if pid == current_turn_player_id:
-                            notify_players(b"YOUR_TURN_AGAIN\n", target_player_ids=[pid])
-                        else:
-                            notify_players(b"OPPONENT_TURN_MSG\n", target_player_ids=[pid])
+                    # Notificar de quién es el turno
+                    turn_msg = f"TURN {current_turn_player_id}\n".encode()
+                    notify_players(turn_msg)
+                    # for pid in clients:
+                    #     if pid == current_turn_player_id:
+                    #         notify_players(b"YOUR_TURN_AGAIN\n", target_player_ids=[pid])
+                    #     else:
+                    #         notify_players(b"OPPONENT_TURN_MSG\n", target_player_ids=[pid])
             elif command == "I_SUNK_MY_SHIP":
                 if not game_active:
                     continue
@@ -207,9 +221,24 @@ def handle_client_connection(conn, player_id, initial_bytes=None):
                     original_shooter_id = last_shot_details.get(player_id)
                     if not original_shooter_id or original_shooter_id not in clients:
                         continue
+                    # --- LÓGICA MODIFICADA PARA NOTIFICAR A TODO EL EQUIPO ---
+                    
+                    # Identificar el equipo del jugador que disparó
+                    shooter_team_id = get_player_team(original_shooter_id)
+                    if not shooter_team_id:
+                        continue
+                    
+                    # Obtener a todos los miembros de ese equipo para notificarles
+                    members_to_notify = team_members.get(shooter_team_id, [])
+
+                    # Crear el mensaje de notificación
                     notification_msg = f"OPPONENT_SHIP_SUNK {player_id} {ship_name} {coords_str_payload}\n"
-                    notify_players(notification_msg.encode(), target_player_ids=[original_shooter_id])
-                except Exception:
+                    
+                    # Enviar el mensaje a todos los miembros del equipo atacante
+                    notify_players(notification_msg.encode(), target_player_ids=members_to_notify)
+
+                except Exception as e:
+                    print(f"Error procesando I_SUNK_MY_SHIP: {e}")
                     continue
             elif command == "GAME_WON":
                 if game_active:
