@@ -71,12 +71,12 @@ def crear_partida_menu():
                 sys.exit()
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if btn_2j.collidepoint(event.pos):
+                    # Aquí podrías implementar la lógica para 4 jugadores
+                    print("Función para 2 jugadores no implementada.")
+                elif btn_4j.collidepoint(event.pos):
                     pygame.quit()
                     game_main_loop()  # Aquí se debería crear la partida de 2 jugadores
                     sys.exit()
-                elif btn_4j.collidepoint(event.pos):
-                    # Aquí podrías implementar la lógica para 4 jugadores
-                    print("Función para 4 jugadores no implementada.")
                 elif btn_atras.collidepoint(event.pos):
                     running = False
 
