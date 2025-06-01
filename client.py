@@ -55,6 +55,8 @@ player_id_str = None # [cite: 722, 992]
 current_game_state = STATE_CONNECTING # [cite: 722, 992]
 status_bar_message = "Conectando al servidor..." # [cite: 722, 992]
 
+g_current_game_id_on_client = None # Para almacenar el ID de la partida a la que el cliente está conectado
+
 my_board_data = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)] # [cite: 722, 992]
 opponent_board_data = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)] # [cite: 723, 992]
 
@@ -171,37 +173,48 @@ def prompt_for_team_name_gui(): # De la versión 4J [cite: 996]
     return text.strip()
 
 
-def connect_to_server_thread():
+def connect_to_server_thread(action, game_id_for_join=None): # Nuevos argumentos
     global client_socket, current_game_state, status_bar_message, player_id_str
-    global game_mode, player_name_local, server_ip_global
+    global game_mode, player_name_local, server_ip_global, g_current_game_id_on_client # Añadido g_current_game_id_on_client
 
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # [cite: 732, 1010]
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        print(f"Intentando conectar a {server_ip_global}:{PORT}...") # [cite: 732, 1010]
-        client_socket.connect((server_ip_global, PORT)) # [cite: 733, 1010]
-        
-        # Enviar información inicial al servidor (modo y nombre si es 2J)
-        initial_server_msg = f"PLAYER_INITIAL_INFO {game_mode}"
-        if game_mode == 2:
-            initial_server_msg += f" {player_name_local}" # [cite: 733]
-        
-        client_socket.sendall(f"{initial_server_msg}\n".encode())
-        print(f"DEBUG CLIENT: Enviado al servidor: {initial_server_msg}")
+        print(f"Intentando conectar a {server_ip_global}:{PORT}...")
+        client_socket.connect((server_ip_global, PORT))
 
-        status_bar_message = "Conectado. Esperando asignación..." # [cite: 734, 1012]
-        threading.Thread(target=listen_for_server_messages, daemon=True).start() # [cite: 734, 1012]
-    except ConnectionRefusedError: # [cite: 734, 1012]
+        initial_server_msg_payload = ""
+        if action == "CREATE":
+            initial_server_msg_payload = f"CREATE_GAME {game_mode}"
+            if game_mode == 2 and player_name_local:
+                initial_server_msg_payload += f" {player_name_local.replace(' ', '_')}"
+        elif action == "JOIN" and game_id_for_join is not None:
+            initial_server_msg_payload = f"JOIN_GAME {game_id_for_join} {game_mode}" # Cliente envía el modo de la partida a la que se une
+            if game_mode == 2 and player_name_local: # Opcional: enviar nombre al unirse a 2J
+                initial_server_msg_payload += f" {player_name_local.replace(' ', '_')}"
+        else:
+            status_bar_message = "Error: Acción de conexión no especificada o ID de partida faltante."
+            current_game_state = STATE_GAME_OVER
+            # Considerar cerrar el socket aquí si es un error irrecuperable.
+            return
+
+        client_socket.sendall(f"{initial_server_msg_payload}\n".encode())
+        print(f"DEBUG CLIENT: Enviado al servidor: {initial_server_msg_payload}")
+
+        status_bar_message = "Conectado. Esperando asignación..."
+        threading.Thread(target=listen_for_server_messages, daemon=True).start()
+    except ConnectionRefusedError:
         status_bar_message = "Error: Conexion rechazada por el servidor."
-        current_game_state = STATE_GAME_OVER # [cite: 734, 1013]
-    except Exception as e: # [cite: 734, 1013]
+        current_game_state = STATE_GAME_OVER
+    except Exception as e:
         status_bar_message = f"Error de conexion: {e}"
-        current_game_state = STATE_GAME_OVER # [cite: 734, 1013]
+        current_game_state = STATE_GAME_OVER
 
 
 def listen_for_server_messages():
     global current_game_state, status_bar_message, player_id_str, my_board_data, opponent_board_data
     global opponent_sunk_ships_log, game_mode, g_my_team_name, g_opponent_team_name, opponents_info
     global is_captain, is_team_board_slave, current_ship_placement_index # Asegurar acceso
+    global g_current_game_id_on_client # Para almacenar el ID de la partida asignada
 
     data_buffer = "" # [cite: 735]
     while current_game_state != STATE_GAME_OVER and client_socket: # [cite: 735]
@@ -229,6 +242,17 @@ def listen_for_server_messages():
                     status_bar_message = ' '.join(parts[1:])
                 elif command == "PLAYER_ID": # [cite: 740, 1052]
                     player_id_str = parts[1] # [cite: 740, 1052]
+                    player_id_str = parts[1]
+                    if len(parts) > 2: # Servidor envía game_id
+                        try:
+                            g_current_game_id_on_client = int(parts[2])
+                            status_bar_message = f"ID: {player_id_str} en Partida: {g_current_game_id_on_client}. Esperando..."
+                        except ValueError:
+                            status_bar_message = f"ID asignado: {player_id_str}. ID de partida inválido: {parts[2]}"
+                            g_current_game_id_on_client = None # Marcar como inválido
+                    else: # Fallback por si el servidor no envía el game_id (compatibilidad o error)
+                        status_bar_message = f"ID asignado: {player_id_str}. Esperando..."
+                        g_current_game_id_on_client = None # No se recibió ID de partida
                     status_bar_message = f"ID asignado: {player_id_str}. Esperando..." # [cite: 1052]
                     if game_mode == 4:
                         is_captain = (player_id_str == "P1" or player_id_str == "P3")
@@ -734,13 +758,14 @@ def check_if_opponent_is_defeated(opponent_b): # [cite: 813, 1167]
     return False # [cite: 816, 1169]
 
 
-def game_main_loop(mode, server_ip_to_join=None, game_id_to_join=None): # Parámetro mode añadido
+def game_main_loop(mode, server_ip_to_join=None, game_id_to_join=None, action="CREATE"): # action y game_id_to_join
     global screen, font_large, font_medium, font_small, current_game_state, status_bar_message
     global current_ship_orientation, hit_sound, miss_sound, sunk_sound, client_socket
     global game_mode, player_name_local, server_ip_global
-    global g_my_team_name, g_opponent_team_name, is_captain, is_team_board_slave, player_id_str # Nuevas globales
+    global g_my_team_name, g_opponent_team_name, is_captain, is_team_board_slave, player_id_str
+    global g_current_game_id_on_client # Nueva global
 
-    game_mode = mode # [cite: 816]
+    game_mode = mode
     server_ip_global = server_ip_to_join if server_ip_to_join else DEFAULT_SERVER_IP
     # game_id_to_join no se usa activamente en este cliente para conectar, pero podría ser útil
 
@@ -754,12 +779,14 @@ def game_main_loop(mode, server_ip_to_join=None, game_id_to_join=None): # Parám
     font_medium = pygame.font.Font(None, 36) # [cite: 817, 1170]
     font_small = pygame.font.Font(None, 28) # [cite: 817, 1170]
 
-    if game_mode == 2:
-        player_name_local = prompt_for_player_name_gui() # [cite: 816]
-        if not player_name_local: # Si el jugador cierra o no ingresa nombre
-            print("Nombre de jugador no ingresado. Saliendo.")
-            pygame.quit()
-            sys.exit()
+    if game_mode == 2 and action == "CREATE": # Solo pedir nombre si crea una partida 2J
+        player_name_local = prompt_for_player_name_gui()
+        if not player_name_local:
+            # ... (salir si no hay nombre)
+            return # Añadido para asegurar que no continúe
+    elif game_mode == 2 and action == "JOIN": # Si se une a 2J, también pedir nombre
+        player_name_local = prompt_for_player_name_gui() # O decidir si el nombre es necesario al unirse
+        if not player_name_local: player_name_local = f"JugadorInvitado" # Fallback
 
     # Cargar sonidos
     pygame.mixer.init() # [cite: 817, 1170]
@@ -790,7 +817,8 @@ def game_main_loop(mode, server_ip_to_join=None, game_id_to_join=None): # Parám
             else: print(f"Archivo no encontrado: {image_path}"); ship_images[ship_name_key] = None # [cite: 825, 1178]
         except Exception as e_img: print(f"Error cargando imagen {ship_name_key}: {e_img}"); ship_images[ship_name_key] = None # [cite: 826, 1179]
 
-    threading.Thread(target=connect_to_server_thread, daemon=True).start() # [cite: 826, 1179]
+    # Pasar la acción y el game_id (si es JOIN) al hilo de conexión
+    threading.Thread(target=connect_to_server_thread, args=(action, game_id_to_join), daemon=True).start()
 
     is_game_running = True # [cite: 826, 1179]
     game_clock = pygame.time.Clock() # [cite: 826, 1179]

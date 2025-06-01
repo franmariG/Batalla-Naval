@@ -70,14 +70,14 @@ def crear_partida_menu():
                 pygame.quit() #
                 sys.exit() #
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1: #
-                if btn_2j.collidepoint(event.pos): #
-                    pygame.quit() #
-                    game_main_loop(mode=2) # Lanzar cliente en modo 2 jugadores
-                    sys.exit() #
-                elif btn_4j.collidepoint(event.pos): #
-                    pygame.quit() #
-                    game_main_loop(mode=4) # Lanzar cliente en modo 4 jugadores
-                    sys.exit() #
+                if btn_2j.collidepoint(event.pos):
+                    pygame.quit()
+                    game_main_loop(mode=2, action="CREATE") # acción para crear
+                    sys.exit()
+                elif btn_4j.collidepoint(event.pos):
+                    pygame.quit()
+                    game_main_loop(mode=4, action="CREATE") # acción para crear
+                    sys.exit()
                 elif btn_atras.collidepoint(event.pos): #
                     running = False
 
@@ -168,12 +168,15 @@ def unirse_partida_menu():
                 if btn_atras.collidepoint(event.pos): #
                     running = False #
                 for btn_rect, partida in partida_buttons: #
-                    if btn_rect.collidepoint(event.pos): #
+                    if btn_rect.collidepoint(event.pos):
                         if partida['jugadores_conectados'] < partida['max_jugadores']:
-                            pygame.quit() #
-                            # Unirse a la partida con el modo determinado por max_jugadores
-                            game_main_loop(mode=partida['max_jugadores'], server_ip_to_join=SERVER_HOST_FOR_LIST, game_id_to_join=partida['id'])
-                            sys.exit() #
+                            pygame.quit()
+                            # Usar la IP del servidor para la lista de partidas también para unirse.
+                            game_main_loop(mode=partida['max_jugadores'],
+                                        server_ip_to_join=SERVER_HOST_FOR_LIST, # Usar la IP definida
+                                        game_id_to_join=partida['id'], # Pasar el ID de la partida
+                                        action="JOIN") # acción para unirse
+                            sys.exit()
                         else:
                             print("Esta partida está llena.")
 
