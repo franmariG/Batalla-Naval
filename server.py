@@ -3,7 +3,7 @@ import socket
 import threading
 import time
 
-# Usar la IP del servidor de 4 jugadores como base
+# Usar la IP del servidor 
 HOST = "169.254.107.4" # Asegúrate que sea la IP correcta de tu servidor
 PORT = 8080
 
@@ -24,11 +24,11 @@ def get_new_game_id():
 # Esta función crea la estructura inicial para una nueva partida.
 def create_new_game_state_template(requested_mode):
     game_state = {
-        "game_id": 0, # Se establecerá cuando se añada a active_games
+        "game_id": 0, 
         "mode": requested_mode,
         "max_players": requested_mode,
-        "clients": {}, # player_id: {conn, addr, name, team_id (si 4p), last_board (si P1/P3 en 4p)}
-        "player_setup_complete": {}, # player_id: bool
+        "clients": {}, 
+        "player_setup_complete": {}, 
         "game_active": False,
         "turn_lock": threading.RLock(), # Lock específico para los turnos de esta partida
         "current_turn_player_id": None,
@@ -59,10 +59,7 @@ def get_player_team_id_from_game(game_state_dict, player_id_in_game):
 
 # Modificar notify_players para que opere sobre una partida específica
 def notify_players_in_game(game_state_dict, message_bytes, target_player_ids=None, exclude_player_id=None):
-    # Se usará game_state_dict["game_specific_lock"] internamente si es necesario para leer game_state_dict["clients"]
-    # o se asume que quien llama ya tiene el lock.
-    # Por simplicidad, asumimos que game_state_dict["clients"] se accede bajo un lock adecuado.
-    
+
     # game_specific_lock debe usarse aquí para leer game_state_dict["clients"] de forma segura
     with game_state_dict["game_specific_lock"]:
         ids_to_notify = []
@@ -70,7 +67,6 @@ def notify_players_in_game(game_state_dict, message_bytes, target_player_ids=Non
             ids_to_notify = target_player_ids
         else:
             ids_to_notify = list(game_state_dict["clients"].keys())
-
         for pid in ids_to_notify:
             if pid == exclude_player_id:
                 continue
@@ -80,7 +76,6 @@ def notify_players_in_game(game_state_dict, message_bytes, target_player_ids=Non
                     client_info['conn'].sendall(message_bytes)
                 except Exception as e:
                     print(f"Error notificando a {pid} en partida {game_state_dict.get('game_id', 'N/A')}: {e}")
-
 
 def handle_client_connection(conn, addr):
     assigned_player_id = None
@@ -117,11 +112,9 @@ def handle_client_connection(conn, addr):
                     conn.sendall(b"MSG Error: Informacion inicial invalida.\n")
                     conn.close()
                     return
-
                 assigned_game_id = get_new_game_id()
                 current_game_state_ref = create_new_game_state_template(requested_mode)
-                current_game_state_ref["game_id"] = assigned_game_id
-                
+                current_game_state_ref["game_id"] = assigned_game_id               
                 assigned_player_id = "P1" # El creador es P1 en su partida
                 current_game_state_ref["clients"][assigned_player_id] = {'conn': conn, 'addr': addr}
                 if requested_mode == 2:
@@ -134,16 +127,16 @@ def handle_client_connection(conn, addr):
                 
                 print(f"INFO SERVER: Jugador {assigned_player_id} ({addr}) creó Partida ID: {assigned_game_id} (Modo {requested_mode}).")
 
-            else: # CREATE_GAME malformado
+            else: 
                 conn.sendall(b"MSG Error: Comando CREATE_GAME incompleto.\n")
                 conn.close()
                 return
 
         elif command == "JOIN_GAME":
-            if len(parts) >= 3: # JOIN_GAME <game_id> <mode> [name_if_2p]
+            if len(parts) >= 3: 
                 try:
                     target_game_id = int(parts[1])
-                    requested_mode = int(parts[2]) # <--- ASEGÚRATE QUE ESTA LÍNEA ESTÉ ASÍ
+                    requested_mode = int(parts[2]) 
                     
                     if requested_mode not in [2, 4]: # Añadir validación
                         print(f"ERROR SERVER: JOIN_GAME modo inválido ({requested_mode}) de {addr}: {initial_msg}")
@@ -151,7 +144,7 @@ def handle_client_connection(conn, addr):
                         conn.close()
                         return
                     
-                    if len(parts) >= 4 and requested_mode == 2 : # Nombre opcional para 2J
+                    if len(parts) >= 4 and requested_mode == 2 : 
                          player_name_temp = " ".join(parts[3:]).replace("_", " ")
 
                 except ValueError:
@@ -167,12 +160,12 @@ def handle_client_connection(conn, addr):
                         return
                     current_game_state_ref = active_games[target_game_id]
                 
-                # Ahora, usar el lock específico de la partida para modificarla
+                #usar el lock específico de la partida para modificarla
                 with current_game_state_ref["game_specific_lock"]:
                     if len(current_game_state_ref["clients"]) >= current_game_state_ref["max_players"]:
                         conn.sendall(b"MSG Partida llena.\n")
                         conn.close()
-                        return # Importante retornar para no seguir procesando este cliente para esta partida
+                        return 
 
                     # Asignar Px al jugador que se une
                     for i in range(1, current_game_state_ref["max_players"] + 1):
@@ -181,7 +174,7 @@ def handle_client_connection(conn, addr):
                             assigned_player_id = pid_candidate
                             break
                     
-                    if not assigned_player_id: # No debería ocurrir si el chequeo de 'llena' es correcto
+                    if not assigned_player_id: 
                         conn.sendall(b"MSG Error: No se pudo asignar ID en la partida.\n")
                         conn.close()
                         return
@@ -194,7 +187,7 @@ def handle_client_connection(conn, addr):
                     
                     assigned_game_id = target_game_id
                     print(f"INFO SERVER: Jugador {assigned_player_id} ({addr}) se unió a Partida ID: {assigned_game_id}.")
-            else: # JOIN_GAME malformado
+            else: 
                 conn.sendall(b"MSG Error: Comando JOIN_GAME incompleto.\n")
                 conn.close()
                 return
@@ -207,18 +200,12 @@ def handle_client_connection(conn, addr):
         # Enviar PLAYER_ID y GAME_ID al cliente
         conn.sendall(f"PLAYER_ID {assigned_player_id} {assigned_game_id}\n".encode())
         time.sleep(0.1)
-        # ----- INICIO DE LA LÓGICA DE PARTIDA (ADAPTAR EXTENSAMENTE) -----
-        # Todas las referencias a `current_game` deben ser `current_game_state_ref`
-        # Todos los `game_lock` deben ser `current_game_state_ref["game_specific_lock"]`
-        # Todos los `turn_lock` deben ser `current_game_state_ref["turn_lock"]`
-        # `notify_players` debe ser `notify_players_in_game(current_game_state_ref, ...)`
-        
         initial_player_info_processed = True
         conn.sendall(f"PLAYER_ID {assigned_player_id}\n".encode()) 
         time.sleep(0.1)
 
         if current_game_state_ref["mode"] == 4:
-            player_client_info = current_game_state_ref["clients"][assigned_player_id] # Accedido después del lock, seguro
+            player_client_info = current_game_state_ref["clients"][assigned_player_id] 
             is_captain = (assigned_player_id == current_game_state_ref["team_details"]["TeamA"]["captain"] or \
                           assigned_player_id == current_game_state_ref["team_details"]["TeamB"]["captain"]) 
             if is_captain:
@@ -243,34 +230,30 @@ def handle_client_connection(conn, addr):
                 except Exception as e:
                     print(f"ERROR SERVER [{assigned_player_id}]: Procesando TEAM_NAME_IS: {e}") 
                 
-                with current_game_state_ref["game_specific_lock"]: # Asegurar acceso a team_details
+                with current_game_state_ref["game_specific_lock"]: 
                     player_team_id_check = current_game_state_ref["clients"][assigned_player_id].get('team_id', get_player_team_id_from_game(current_game_state_ref, assigned_player_id))
                     if not current_game_state_ref["team_details"][player_team_id_check]['name']:
                         default_team_name = f"Equipo_{player_team_id_check[-1]}" 
                         current_game_state_ref["team_details"][player_team_id_check]['name'] = default_team_name 
                         print(f"INFO SERVER [{assigned_player_id}]: Usando nombre de equipo por defecto '{default_team_name}' para {player_team_id_check}.")
 
-        # --- NUEVA Fase Consolidada de Espera y Señalización de Configuración ---
+        # ---Fase Consolidada de Espera y Señalización de Configuración ---
         setup_signal_sent_to_this_client = False 
-        # Una bandera en game_state["clients"][assigned_player_id]['got_setup_prompt'] puede rastrear si se enviaron OPPONENT_NAME/TEAMS_INFO y SETUP_YOUR_BOARD.
-        # Inicializa esta bandera cuando el cliente se añade a game_state.
-        # Ejemplo: current_game_state_ref["clients"][assigned_player_id]['got_setup_prompt'] = False
-
         wait_for_global_readiness_loops = 0
-        # Puedes ajustar este timeout. Es el tiempo máximo que un cliente esperará si la partida nunca se llena.
+        #  Es el tiempo máximo que un cliente esperará si la partida nunca se llena.
         MAX_GLOBAL_WAIT_LOOPS = 180 # ej., 180 segundos (3 minutos)
 
         while not setup_signal_sent_to_this_client and wait_for_global_readiness_loops < MAX_GLOBAL_WAIT_LOOPS:
             game_is_globally_ready_now = False
             num_current_clients = 0
-            is_this_client_still_connected = False # Renombrado para claridad
+            is_this_client_still_connected = False 
 
             with current_game_state_ref["game_specific_lock"]:
                 if assigned_player_id not in current_game_state_ref["clients"]:
                     print(f"DEBUG SERVER [{assigned_player_id}]: Cliente desconectado durante espera de disponibilidad global.")
-                    return # Salir del manejador si el cliente ya no está en el estado del juego
+                    return 
 
-                is_this_client_still_connected = True # Todavía en el diccionario de clientes
+                is_this_client_still_connected = True 
                 num_current_clients = len(current_game_state_ref["clients"])
                 
                 # Verificar condición de disponibilidad global
@@ -280,19 +263,9 @@ def handle_client_connection(conn, addr):
                                          current_game_state_ref["team_details"]["TeamB"]["name"]
                     ready_check = ready_check and all_team_names_set
                 game_is_globally_ready_now = ready_check
-                
-                # Verificar si este cliente ya recibió su indicación de configuración
-                # Es mejor usar una bandera específica para esto en lugar de player_setup_complete
-                # Asumamos una nueva bandera: current_game_state_ref["clients"][assigned_player_id].get('setup_prompt_sent', False)
-                # Asegúrate de que esta bandera se inicialice a False cuando un jugador se une.
-                # Para este ejemplo, lo simularemos con setup_signal_sent_to_this_client por simplicidad,
-                # pero una bandera persistente en game_state es mejor.
 
             if game_is_globally_ready_now:
-                with current_game_state_ref["game_specific_lock"]: # Readquirir el lock para modificación/envío seguro
-                    # Verificar si este cliente aún necesita la indicación de configuración
-                    # Esta verificación debería usar una bandera persistente. Por ahora, dependemos de la condición del bucle.
-
+                with current_game_state_ref["game_specific_lock"]: 
                     # Determinar si este cliente es un "jugador de configuración" (P1/P2 para 2J, P1/P3 para 4J)
                     is_primary_setup_player = (current_game_state_ref["mode"] == 2) or \
                                               (current_game_state_ref["mode"] == 4 and assigned_player_id in ("P1", "P3"))
@@ -316,8 +289,7 @@ def handle_client_connection(conn, addr):
                         
                         conn.sendall(b"SETUP_YOUR_BOARD\n") # 
                         print(f"DEBUG SERVER [{assigned_player_id}]: Enviado OPPONENT_NAME/TEAMS_INFO_FINAL y SETUP_YOUR_BOARD (partida globalmente lista).")
-                        # Marcar que este cliente ha recibido la indicación para prevenir reenvío (idealmente usando una bandera persistente)
-                        # current_game_state_ref["clients"][assigned_player_id]['setup_prompt_sent'] = True
+
                         setup_signal_sent_to_this_client = True # Salir del bucle de espera de este manejador
                     
                     elif current_game_state_ref["mode"] == 4 and assigned_player_id in ("P2", "P4"):
@@ -331,10 +303,8 @@ def handle_client_connection(conn, addr):
                         teams_info_final_msg = f"TEAMS_INFO_FINAL {my_team_name_final.replace(' ', '_')} {opponent_team_name_final.replace(' ', '_')} {opponent_ids_payload}\n" # 
                         conn.sendall(teams_info_final_msg.encode())
                         print(f"DEBUG SERVER [{assigned_player_id}]: Enviado TEAMS_INFO_FINAL. Esperando TEAM_BOARD del capitán.")
-                        # Marcar indicación enviada y salir del bucle de espera para este manejador
-                        # current_game_state_ref["clients"][assigned_player_id]['setup_prompt_sent'] = True
+                       
                         setup_signal_sent_to_this_client = True 
-                # Fin de la sección crítica con lock
             else:
                 # La partida aún no está globalmente lista. Enviar un mensaje de espera.
                 msg_parts = [f"MSG Esperando jugadores ({num_current_clients}/{current_game_state_ref['max_players']})"]
@@ -347,41 +317,33 @@ def handle_client_connection(conn, addr):
                          team_b_name_status = current_game_state_ref["team_details"]["TeamB"]["name"] or "Pendiente"
                     msg_parts.append(f". Nombres Equipo A: {team_a_name_status}, Equipo B: {team_b_name_status}")
                 
-                full_wait_msg = "".join(msg_parts)
+                full_wait_msg = "".join(msg_parts)          
                 
-                # Enviar mensaje periódicamente
                 if wait_for_global_readiness_loops % 5 == 0 or wait_for_global_readiness_loops == 0:
                     try:
                         conn.sendall(f"{full_wait_msg}\n".encode()) # 
                     except socket.error:
                         print(f"DEBUG SERVER [{assigned_player_id}]: Error de socket durante envío de espera global. Cliente probablemente desconectado.")
-                        return # Salir del manejador
+                        return 
                 
                 wait_for_global_readiness_loops += 1
-                time.sleep(1) # Esperar antes de volver a verificar el estado global
-
+                time.sleep(1) 
         # Después del bucle:
         if not is_this_client_still_connected: # Doble verificación por si el cliente se desconectó
              return 
 
         if not setup_signal_sent_to_this_client and wait_for_global_readiness_loops >= MAX_GLOBAL_WAIT_LOOPS:
-            # El manejador de este cliente específico expiró esperando que la partida estuviera globalmente lista.
+            # Si llegamos aquí, significa que el cliente esperó demasiado tiempo sin que la partida estuviera lista.    
             print(f"ERROR SERVER [{assigned_player_id}]: Timeout global ({MAX_GLOBAL_WAIT_LOOPS}s) esperando que la partida esté lista. ({num_current_clients}/{current_game_state_ref['max_players']}).")
             try:
                 conn.sendall(b"MSG Error: Timeout esperando que la partida este completamente lista. Desconectando.\n")
             except socket.error:
                 pass # El cliente podría haberse ido ya
             # El bloque finally de handle_client_connection se encargará de la limpieza.
-            return # Salir de este manejador.
+            return 
         
-        # Si setup_signal_sent_to_this_client es true aquí, el cliente de este manejador recibió su indicación.
-        # Si es false aquí, significa que es un jugador P2/P4 que recibió TEAMS_INFO y ahora está listo para el bucle principal.
-        # (Esta condición necesita refinamiento si P2/P4 no deben continuar si la partida no se preparó)
-        # La lógica anterior tiene como objetivo asegurar que P2/P4 también solo continúen si game_is_globally_ready_now fue true.
-
         print(f"DEBUG SERVER [{assigned_player_id}]: Finalizada fase de espera global. Procediendo al bucle principal de mensajes.")
-        # ----- Fin de la NUEVA Fase Consolidada de Espera y Señalización de Configuración ---
-        
+     
         while True:
             data_bytes = conn.recv(1024) 
             if not data_bytes:
@@ -395,8 +357,8 @@ def handle_client_connection(conn, addr):
                 data = data_single_message.strip() 
                 if not data: 
                     continue
-                
-                # Mantener los logs de depuración anteriores aquí si se desea
+
+                # Mantener los logs de depuración 
                 print(f"DEBUG SERVER [{assigned_player_id}]: Datos: '{data}'")
                 parts = data.split() 
                 if not parts: continue
@@ -433,15 +395,15 @@ def handle_client_connection(conn, addr):
                             my_team_id_for_msg = get_player_team_id_from_game(current_game_state_ref, assigned_player_id) 
                             my_team_name_for_msg = current_game_state_ref["team_details"].get(my_team_id_for_msg, {}).get('name', f"Equipo {my_team_id_for_msg}") 
                             notify_players_in_game(
-                                current_game_state_ref, # Añadir current_game_state_ref
+                                current_game_state_ref, 
                                 f"MSG El capitan del {my_team_name_for_msg} ({assigned_player_id}) ha terminado.\n".encode(),
-                                exclude_player_id=assigned_player_id # Cambiar nombre del argumento
+                                exclude_player_id=assigned_player_id 
                             )
                         try:
                             conn.sendall(b"MSG Esperando que el oponente/otros terminen...\n") 
                         except socket.error: 
                             print(f"DEBUG SERVER [{assigned_player_id}]: Socket error al enviar 'MSG Esperando...' después de READY_SETUP. Terminando hilo.")
-                            break # Este break sale del for data_single_message, luego podría salir del while True
+                            break 
 
                         all_set_up = False
                         if current_game_state_ref["mode"] == 2:
@@ -485,16 +447,14 @@ def handle_client_connection(conn, addr):
                                     print(f"INFO SERVER: Juego iniciado. Turno para: {current_game_state_ref['current_turn_player_id']}")
                                 else: 
                                     print(f"DEBUG SERVER [{assigned_player_id}]: Juego YA ESTABA activo bajo turn_lock. No se reinicia.")
-                        # Fin del if all_set_up
-
+                       
                 elif command == "TEAM_BOARD_DATA": 
                     if current_game_state_ref["mode"] == 4 and assigned_player_id in ("P1", "P3"):
                         with current_game_state_ref["game_specific_lock"]: 
                             board_payload = " ".join(parts[1:]) 
                             current_game_state_ref["clients"][assigned_player_id]['last_board'] = board_payload.strip() 
                         print(f"DEBUG [{assigned_player_id}]: Recibido TEAM_BOARD_DATA. Length: {len(board_payload)}")
-                    # No necesita `continue` explícito si no hay más lógica para este comando en el bucle
-
+                   
                 elif command == "SHOT": 
                     if not current_game_state_ref.get("game_active") or current_game_state_ref.get("current_turn_player_id") != assigned_player_id:
                         try: conn.sendall(b"MSG No es tu turno o juego no activo.\n"); continue
@@ -509,7 +469,7 @@ def handle_client_connection(conn, addr):
                             print(f"[{assigned_player_id}] disparo a ({r},{c}). Enviando al oponente.")
                         except IndexError:
                              print(f"ERROR [{assigned_player_id}]: SHOT malformado (2P) - {data}")
-                             continue # Continuar con el siguiente mensaje en el buffer
+                             continue 
                     
                     elif current_game_state_ref["mode"] == 4:
                         try:
@@ -547,7 +507,7 @@ def handle_client_connection(conn, addr):
                                 current_game_state_ref["current_turn_player_id"] = original_shooter_id
                                 notify_players_in_game(current_game_state_ref, b"YOUR_TURN_AGAIN\n", target_player_ids=[original_shooter_id])
                                 notify_players_in_game(current_game_state_ref, b"OPPONENT_TURN_MSG\n", target_player_ids=[assigned_player_id])
-                            else: # Miss 'M'
+                            else: 
                                 current_game_state_ref["current_turn_player_id"] = assigned_player_id
                                 notify_players_in_game(current_game_state_ref, b"YOUR_TURN_AGAIN\n", target_player_ids=[assigned_player_id])
                                 notify_players_in_game(current_game_state_ref, b"OPPONENT_TURN_MSG\n", target_player_ids=[original_shooter_id])
@@ -576,7 +536,6 @@ def handle_client_connection(conn, addr):
                             print(f"INFO SERVER (4P): Turno para {current_game_state_ref['current_turn_player_id']}.")
 
                 elif command == "I_SUNK_MY_SHIP": 
-                    # ... (código original de I_SUNK_MY_SHIP, asegurar locks si es necesario para leer last_shot_details) ...
                     if not current_game_state_ref.get("game_active"): continue
                     try:
                         ship_name = parts[1]
@@ -594,11 +553,11 @@ def handle_client_connection(conn, addr):
                             if not original_shooter_id_sunk or original_shooter_id_sunk not in current_game_state_ref.get("clients",{}):
                                 continue
                             
-                            shooter_team_id = get_player_team_id_from_game(current_game_state_ref, original_shooter_id_sunk) # No necesita lock si player_teams es estable
+                            shooter_team_id = get_player_team_id_from_game(current_game_state_ref, original_shooter_id_sunk) 
                             if not shooter_team_id: continue
 
                             members_to_notify_sunk = []
-                            with current_game_state_ref["game_specific_lock"]: # Para leer team_members_map
+                            with current_game_state_ref["game_specific_lock"]: 
                                 members_to_notify_sunk = current_game_state_ref["team_members_map"].get(shooter_team_id, [])
                             
                             notify_players_in_game(current_game_state_ref, f"OPPONENT_SHIP_SUNK {assigned_player_id} {ship_name} {coords_str_payload}\n".encode(), target_player_ids=members_to_notify_sunk)
@@ -639,21 +598,15 @@ def handle_client_connection(conn, addr):
                             for p_lose_id in losers: notify_players_in_game(current_game_state_ref, b"GAME_OVER LOSE\n", target_player_ids=[p_lose_id])
                         
                         time.sleep(0.5)
-                        break # Salir del bucle de mensajes, el juego terminó para este jugador.
+                        break 
                     else:
                         print(f"WARN SERVER [{assigned_player_id}]: GAME_WON ignorado, juego no activo.")
-
-                # Aquí terminaba el `for data_single_message in messages_received:`
-                # Si un `break` ocurrió dentro del for, sale aquí.
-            # Aquí termina el `while True:` si el `break` interno lo gatilló (ej. socket error, GAME_WON)
-            # o si `if not data_bytes:` fue verdadero.
 
     except ConnectionResetError: 
         print(f"Jugador {assigned_player_id or addr} ha reseteado la conexion.") 
     except socket.timeout:
         print(f"Socket timeout para {assigned_player_id or addr}.")
     except socket.error as e: 
-        # Solo loguear si era relevante o no era la desconexión esperada
         if current_game_state_ref.get("game_active", False) or not initial_player_info_processed:
              if isinstance(e, ConnectionResetError) or (hasattr(e, 'winerror') and e.winerror == 10054): # Común en Windows
                  print(f"Jugador {assigned_player_id or addr} cerró la conexión (socket error detectado).")
@@ -665,7 +618,7 @@ def handle_client_connection(conn, addr):
         traceback.print_exc()
     finally:
         print(f"Limpiando para el jugador {assigned_player_id or addr} en partida {assigned_game_id or 'N/A'}.")
-        # ... (cierre de conexión) ...
+       
 
         if assigned_game_id is not None and assigned_player_id is not None:
             game_ended_by_this_dc = False
@@ -681,33 +634,17 @@ def handle_client_connection(conn, addr):
                         was_game_active_before_leaving = game_to_clean["game_active"]
                         if was_game_active_before_leaving:
                              with game_to_clean["turn_lock"]: # Usar el turn_lock de la partida específica
-                                if game_to_clean["game_active"]: # Doble chequeo
+                                if game_to_clean["game_active"]: 
                                     game_to_clean["game_active"] = False
                                     game_to_clean["current_turn_player_id"] = None
                                     game_ended_by_this_dc = True
                             
                         if game_ended_by_this_dc:
                             print(f"INFO SERVER: Jugador {assigned_player_id} se fue durante partida activa {assigned_game_id}.")
-                            # Notificar a los jugadores restantes de ESA partida específica
-                            # (La lógica de OPPONENT_LEFT y GAME_OVER WIN debe adaptarse para usar notify_players_in_game)
-                            # ...
-
+                      
                         if not game_to_clean["clients"]: # Si la partida queda vacía
                             print(f"Partida ID: {assigned_game_id} está vacía. Eliminando de active_games.")
-                            # games_list_lock ya está adquirido si esta lógica se mueve dentro del bloque 'with games_list_lock:'
-                            # o se readquiere si es necesario.
-                            # Este del active_games[assigned_game_id] debe estar bajo games_list_lock
-                            # del active_games[assigned_game_id] # ¡CUIDADO! Este 'del' debe estar dentro del 'with games_list_lock:'
-                            # Si esta parte del 'finally' está fuera del 'with games_list_lock' inicial (lo cual parece ser el caso),
-                            # entonces active_games debe ser accedido/modificado con games_list_lock de nuevo.
-                            # Lo más seguro es una estructura así:
-                            # with games_list_lock:
-                            #    if assigned_game_id in active_games:
-                            #        game_to_clean = active_games[assigned_game_id]
-                            #        # ... lógica con game_to_clean["game_specific_lock"] ...
-                            #        if not game_to_clean["clients"]:
-                            #            del active_games[assigned_game_id]
-                            pass # La eliminación se hará afuera si es necesario para simplificar.
+                            pass 
 
             # Re-chequear y eliminar si la partida está vacía, ahora con el lock apropiado
             with games_list_lock:
@@ -719,7 +656,7 @@ def handle_client_connection(conn, addr):
 
 def get_formatted_available_games():
     games_output = []
-    with games_list_lock: # Proteger el acceso a active_games
+    with games_list_lock: 
         for game_id, game_state in active_games.items():
             # Usar el lock específico de la partida para leer su estado interno de forma segura
             with game_state["game_specific_lock"]:
@@ -733,10 +670,8 @@ def get_formatted_available_games():
                             team_a_name = game_state["team_details"]["TeamA"]["name"]
                             if team_a_name:
                                 creator_display_name = f"Equipo: {team_a_name}"
-                            # else: Usa el nombre P1 si el nombre del equipo aún no está.
                             elif 'name' in game_state["clients"]["P1"] : # Si P1 tiene nombre (no siempre para 4J)
                                  creator_display_name = game_state["clients"]["P1"]['name']
-
 
                     games_output.append({
                         "nombre_creador": creator_display_name, # Será usado como nombre de la partida en el menú del cliente
@@ -766,7 +701,6 @@ def handle_list_games_request(conn_list):
 
 def start_server():
     global current_game_state_ref
-    #reset_current_game_state() 
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) 
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
@@ -792,7 +726,6 @@ def start_server():
                 continue
 
             initial_peek_bytes = None
-            is_list_request = False
             try:
                 conn.settimeout(0.2)  
                 initial_peek_bytes = conn.recv(1024, socket.MSG_PEEK) 
@@ -800,10 +733,8 @@ def start_server():
                 if initial_peek_bytes:
                     decoded_peek = initial_peek_bytes.decode().strip()
                     if decoded_peek.startswith("LIST_GAMES"): 
-                        is_list_request = True
                         conn.recv(len(initial_peek_bytes)) 
                         print(f"DEBUG SERVER: Recibida petición LIST_GAMES de {addr}.") 
-                        # No crear hilo para LIST_GAMES, manejar directamente
                         handle_list_games_request(conn) 
                         continue 
             except socket.timeout: 
@@ -818,7 +749,6 @@ def start_server():
             thread.start()
             active_threads.append(thread)
             
-            # Limpiar hilos terminados (opcional, pero buena práctica)
             active_threads = [t for t in active_threads if t.is_alive()]
 
     except KeyboardInterrupt:
@@ -832,20 +762,14 @@ def start_server():
                 t.join(timeout=1.0) # Dar un poco de tiempo para que los hilos terminen
         print("Servidor principal finalizando.")
 
-
-# if __name__ == "__main__":
-#     # No es necesario un hilo separado para start_server si la lógica de finalización está en start_server
-#     start_server()
-
-
 if __name__ == "__main__":
-    server_thread = threading.Thread(target=start_server, daemon=True) # [cite: 718, 990]
-    server_thread.start() # [cite: 718, 990]
-    print("Presiona Ctrl+C para detener el servidor.") # [cite: 718, 990]
+    server_thread = threading.Thread(target=start_server, daemon=True) 
+    server_thread.start() 
+    print("Presiona Ctrl+C para detener el servidor.") 
     try:
-        while server_thread.is_alive(): # [cite: 718, 990]
+        while server_thread.is_alive(): 
             time.sleep(1)
-    except KeyboardInterrupt: # [cite: 719, 990]
-        print("\nDeteniendo el servidor (Ctrl+C)...") # [cite: 719, 990]
+    except KeyboardInterrupt:
+        print("\nDeteniendo el servidor (Ctrl+C)...") 
     finally:
-        print("Servidor principal finalizando.") # [cite: 719, 990]
+        print("Servidor principal finalizando.") 

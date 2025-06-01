@@ -17,7 +17,7 @@ BUTTON_COLOR = (70, 130, 180)
 BUTTON_HOVER_COLOR = (100, 149, 237)
 BUTTON_TEXT_COLOR = WHITE
 
-# Usaremos la IP del servidor de 4 jugadores como base
+# Usaremos la IP del servidor 
 SERVER_HOST_FOR_LIST = "169.254.107.4" # Asegúrate que sea la IP correcta de tu servidor
 SERVER_PORT_FOR_LIST = 8080
 
@@ -42,7 +42,7 @@ def draw_button(surface, rect, text, font, is_hovered):
     surface.blit(text_surf, text_rect)
 
 def crear_partida_menu():
-    global SCREEN_WIDTH, SCREEN_HEIGHT  # Declarar variables globales
+    global SCREEN_WIDTH, SCREEN_HEIGHT  
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
     pygame.display.set_caption("Crear Partida - Batalla Naval") #
